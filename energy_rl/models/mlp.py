@@ -33,7 +33,7 @@ class MLP(nn.Module):
         for layer in self.layers:
             x = F.relu(layer(x))
 
-        # TODO
+        # TODO compute consumption.
         c = torch.zeros(x.size(0), 1)
 
         return x, c
