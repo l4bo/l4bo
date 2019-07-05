@@ -1,5 +1,5 @@
 ## L4BO
 
-### Project: energy_rl
+### Projects
 
-*Study of back-propagation in energy constrained environments*
+- **energy_rl**: *Study of back-propagation in energy constrained environments*
