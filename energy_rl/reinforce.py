@@ -34,14 +34,11 @@ class REINFORCE:
 
     def init_training(
             self,
-            env: string,
+            env: str,
     ):
         self._optimizer = optim.Adam(
             [
-                {'params': self._model_E.parameters()},
-                {'params': self._model_H.parameters()},
-                {'params': self._model_PH.parameters()},
-                {'params': self._model_VH.parameters()},
+                {'params': self._model.parameters()},
             ],
             lr=self._learning_rate,
         )
