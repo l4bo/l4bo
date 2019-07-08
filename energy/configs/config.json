@@ -1,0 +1,21 @@
+{
+  "device": "cuda:0",
+
+  "load_dir": null,
+  "save_dir": null,
+
+  "seed": 42,
+
+  "energy_gym_env": "PongNoFrameskip-v4",
+
+  "energy_mlp_hidden_size": 256,
+  "energy_mlp_layer_count": 4,
+
+  "energy_reinforce_learning_rate": 0.0001,
+  "energy_reinforce_rollout_size": 16,
+  "energy_reinforce_env_pool_size": 16,
+  "energy_reinforce_gamma": 0.99,
+  "energy_reinforce_tau": 0.95,
+
+  "tensorboard_log_dir": null
+}

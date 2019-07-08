@@ -12,6 +12,7 @@ setup(
     include_package_data=True,
     entry_points={
         'console_scripts': [
+            'energy_reinforce_train=energy.reinforce:train',
         ],
     },
 )
