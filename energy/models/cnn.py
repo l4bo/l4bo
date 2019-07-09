@@ -12,11 +12,11 @@ class CNN(nn.Module):
         self._hidden_size = config.get('energy_hidden_size')
 
         self._convs = nn.Sequential(
-            nn.Conv2d(channel_count, 8, 4, stride=2),
+            nn.Conv2d(channel_count, 32, 8, stride=4),
             nn.ReLU(),
-            nn.Conv2d(8, 16, 4, stride=2),
+            nn.Conv2d(32, 64, 4, stride=2),
             nn.ReLU(),
-            nn.Conv2d(16, 32, 4, stride=2),
+            nn.Conv2d(64, 32, 3, stride=1),
             nn.ReLU(),
             # nn.Conv2d(32, 32, 4, stride=2),
             # nn.ReLU(),
@@ -25,9 +25,9 @@ class CNN(nn.Module):
         )
 
         self._tail = nn.Sequential(
-            nn.Linear(2048, self._hidden_size),
+            nn.Linear(32*7*7, self._hidden_size),
             nn.ReLU(),
-            nn.LayerNorm(self._hidden_size),
+            # nn.LayerNorm(self._hidden_size),
         )
 
     def parameters_count(
@@ -41,7 +41,7 @@ class CNN(nn.Module):
     ):
         out = self._convs(observations)
 
-        out = out.view(-1, 2048)
+        out = out.view(-1, 32*7*7)
         assert out.size(0) == observations.size(0)
 
         hiddens = self._tail(out)
