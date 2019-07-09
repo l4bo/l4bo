@@ -1,16 +1,17 @@
 import argparse
-import gym
 import os
+import gym
 import torch
-import torch.nn as nn
-import torch.distributed as distributed
-import torch.utils.data.distributed
+import torch.nn.functional as F
 import torch.optim as optim
 
-from energy.models.mlp import MLP
-from energy.tools.atari_wrappers import make_atari, wrap_deepmind
-from energy.tools.subproc_vec_env import SubprocVecEnv
+from energy.models.cnn import CNN
+from energy.models.heads import PH, VH
 
+from energy.tools.atari_wrappers import make_atari, wrap_deepmind
+from energy.tools.vec_env.subproc_vec_env import SubprocVecEnv
+
+from torch.distributions import Categorical
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 
 from utils.config import Config
@@ -47,20 +48,19 @@ class Rollouts:
         self._tau = config.get('energy_reinforce_tau')
 
         self._rollout_size = config.get('energy_reinforce_rollout_size')
-        self._pool_size = config.get('energy_reinforce_env_pool_size')
-        self._batch_size = config.get('prooftrace_ppo_batch_size')
+        self._pool_size = config.get('energy_reinforce_pool_size')
 
         self._observations = torch.zeros(
             self._rollout_size+1, self._pool_size, *(self._obs_shape),
         ).to(self._device)
 
         self._actions = torch.zeros(
-            self._rollout_size, self._pool_size, 3,
+            self._rollout_size, self._pool_size, 1,
             dtype=torch.int64,
         ).to(self._device)
 
         self._log_probs = torch.zeros(
-            self._rollout_size, self._pool_size, 3,
+            self._rollout_size, self._pool_size, 1,
         ).to(self._device)
 
         self._rewards = torch.zeros(
@@ -125,10 +125,11 @@ class Rollouts:
     def generator(
             self,
             advantages,
+            batch_size,
     ):
         sampler = BatchSampler(
             SubsetRandomSampler(range(self._pool_size * self._rollout_size)),
-            self._batch_size,
+            batch_size,
             drop_last=False,
         )
         for sample in sampler:
@@ -145,6 +146,22 @@ class Rollouts:
                 self._log_probs.view(-1, self._log_probs.size(-1))[indices], \
                 advantages.view(-1, 1)[indices]
 
+    def batch(
+            self,
+            advantages,
+    ):
+        return (
+            self._observations[:-1].view(
+                -1, *(self._obs_shape),
+            ),
+            self._actions.view(-1, self._actions.size(-1)),
+            self._values[:-1].view(-1, 1),
+            self._returns[:-1].view(-1, 1),
+            self._masks[:-1].view(-1, 1),
+            self._log_probs.view(-1, self._log_probs.size(-1)),
+            advantages.view(-1, 1),
+        )
+
 
 class A2C:
     def __init__(
@@ -157,41 +174,72 @@ class A2C:
         self._save_dir = config.get('save_dir')
         self._load_dir = config.get('load_dir')
 
-        self._model = MLP(config).to(self._device)
-        self._learning_rate = \
-            config.get('energy_reinforce_learning_rate')
+        self._learning_rate = config.get('energy_reinforce_learning_rate')
+        self._rollout_size = config.get('energy_reinforce_rollout_size')
+        self._pool_size = config.get('energy_reinforce_pool_size')
+        self._value_coeff = config.get('energy_reinforce_value_coeff')
+        self._entropy_coeff = config.get('energy_reinforce_entropy_coeff')
+
+        self._envs = SubprocVecEnv(
+            [make_env(
+                self._config.get('energy_gym_env'),
+                self._config.get('seed'),
+                i,
+            ) for i in range(self._pool_size)],
+        )
+
+        self._obs_shape = (
+            self._envs.observation_space.shape[2],
+            self._envs.observation_space.shape[0],
+            self._envs.observation_space.shape[1],
+        )
+        channel_count = self._envs.observation_space.shape[2]
+
+        self._rollouts = Rollouts(self._config, self._obs_shape)
+
+        observations = self._envs.reset()
+
+        self._rollouts._observations[0].copy_(
+            torch.from_numpy(
+                observations,
+            ).float().transpose(3, 1).to(self._device) / 255.0,
+        )
+        self._episode_rewards = [0.0] * self._pool_size
+
+        self._modules = {
+            'CNN': CNN(self._config, channel_count).to(self._device),
+            'PH': PH(self._config, self._envs.action_space.n).to(self._device),
+            'VH': VH(self._config).to(self._device),
+        }
 
         Log.out(
-            "Initializing A2C", {
-                'paramater_count_MLP': self._model.parameters_count(),
+            "Initializing A2C modules", {
+                'paramater_count_CNN': self._modules['CNN'].parameters_count(),
+                'paramater_count_PH': self._modules['PH'].parameters_count(),
+                'paramater_count_VH': self._modules['VH'].parameters_count(),
             },
         )
 
-        self._train_batch = 0
-
-    def init_training(
-            self,
-    ):
         self._optimizer = optim.Adam(
             [
-                {'params': self._model.parameters()},
+                {'params': self._modules['CNN'].parameters()},
+                {'params': self._modules['PH'].parameters()},
+                {'params': self._modules['VH'].parameters()},
             ],
             lr=self._learning_rate,
         )
 
-        self._envs = SubprocVecEnv(
-            [make_env(
-                'PongNoFrameskip-v4', 
-                self._config.get('seed'),
-                i,
-            ) for i in range(config.get(')],
-        )
-        obs_shape = self._envs.observation_space.shape
+        Log.out('A2C initialized', {
+            "pool_size": self._config.get('energy_reinforce_pool_size'),
+            "rollout_size": self._config.get('energy_reinforce_rollout_size'),
+        })
 
     def load(
             self,
             training=True,
     ):
+        super().load()
+
         if self._load_dir:
             if os.path.isfile(
                     self._load_dir + "/model.pt",
@@ -200,22 +248,35 @@ class A2C:
                     "Loading models", {
                         'load_dir': self._load_dir,
                     })
-                self._mode.load_state_dict(
+                self._modules['CNN'].load_state_dict(
                     torch.load(
-                        self._load_dir + "/model.pt",
+                        self._load_dir + "/module_CNN.pt",
                         map_location=self._device,
                     ),
                 )
-                if training:
-                    if os.path.isfile(
+                self._modules['PH'].load_state_dict(
+                    torch.load(
+                        self._load_dir + "/module_PH.pt",
+                        map_location=self._device,
+                    ),
+                )
+                self._modules['VH'].load_state_dict(
+                    torch.load(
+                        self._load_dir + "/module_VH.pt",
+                        map_location=self._device,
+                    ),
+                )
+
+            if training:
+                if os.path.isfile(
+                        self._load_dir + "/optimizer.pt",
+                ):
+                    self._optimizer.load_state_dict(
+                        torch.load(
                             self._load_dir + "/optimizer.pt",
-                    ):
-                        self._optimizer.load_state_dict(
-                            torch.load(
-                                self._load_dir + "/optimizer.pt",
-                                map_location=self._device,
-                            ),
-                        )
+                            map_location=self._device,
+                        ),
+                    )
 
         return self
 
@@ -229,26 +290,132 @@ class A2C:
                 })
 
             torch.save(
-                self._model.state_dict(),
-                self._save_dir + "/model.pt",
+                self._modules['CNN'].state_dict(),
+                self._save_dir + "/module_CNN.pt",
+            )
+            torch.save(
+                self._modules['PH'].state_dict(),
+                self._save_dir + "/module_PH.pt",
+            )
+            torch.save(
+                self._modules['VH'].state_dict(),
+                self._save_dir + "/module_VH.pt",
             )
             torch.save(
                 self._optimizer.state_dict(),
                 self._save_dir + "/optimizer.pt",
             )
 
-    def batch_train(
+    def run_once(
             self,
             epoch: int,
     ):
         assert self._optimizer is not None
 
-        self._model.train()
+        for m in self._modules:
+            self._modules[m].train()
 
-        # TRAIN LOOP
+        reward_meter = Meter()
+        act_loss_meter = Meter()
+        val_loss_meter = Meter()
+        entropy_meter = Meter()
 
-        Log.out("EPOCH DONE", {
+        for step in range(self._rollout_size):
+            with torch.no_grad():
+                obs = self._rollouts._observations[step]
+
+                hiddens = self._modules['CNN'](obs).detach()
+                prd_actions = self._modules['PH'](hiddens)
+                values = self._modules['VH'](hiddens)
+
+                m = Categorical(torch.exp(prd_actions))
+                actions = m.sample().view(-1, 1)
+
+                observations, rewards, dones, infos = self._envs.step(
+                    actions.cpu().numpy(),
+                )
+
+                observations = torch.from_numpy(
+                    observations,
+                ).float().transpose(3, 1).to(self._device) / 255.0
+
+                log_probs = prd_actions.gather(1, actions)
+
+                for i, r in enumerate(rewards):
+                    self._episode_rewards[i] += r
+                    if dones[i]:
+                        reward_meter.update(self._episode_rewards[i])
+                        self._episode_rewards[i] = 0.0
+
+                self._rollouts.insert(
+                    step,
+                    observations,
+                    actions.detach(),
+                    log_probs.detach(),
+                    values.detach(),
+                    torch.tensor(
+                        [r for r in rewards], dtype=torch.float,
+                    ).unsqueeze(1).to(self._device),
+                    torch.tensor(
+                        [[0.0] if d else [1.0] for d in dones],
+                    ).to(self._device),
+                )
+
+        with torch.no_grad():
+            obs = self._rollouts._observations[-1]
+
+            hiddens = self._modules['CNN'](obs).detach()
+            values = self._modules['VH'](hiddens)
+
+            self._rollouts.compute_returns(values.detach())
+
+            advantages = \
+                self._rollouts._returns[:-1] - self._rollouts._values[:-1]
+            advantages = \
+                (advantages - advantages.mean()) / (advantages.std() + 1e-5)
+
+        rollout_observations, \
+            rollout_actions, \
+            rollout_values, \
+            rollout_returns, \
+            rollout_masks, \
+            rollout_log_probs, \
+            rollout_advantages = self._rollouts.batch(advantages)
+
+        hiddens = self._modules['CNN'](rollout_observations)
+        prd_actions = self._modules['PH'](hiddens)
+        values = self._modules['VH'](hiddens)
+
+        log_probs = prd_actions.gather(1, rollout_actions)
+        entropy = -(
+            (prd_actions * torch.exp(prd_actions)).mean()
+        )
+
+        action_loss = -(rollout_advantages * log_probs).mean()
+        value_loss = F.mse_loss(values, rollout_returns)
+
+        # Backward pass.
+        for m in self._modules:
+            self._modules[m].zero_grad()
+
+        (
+            action_loss +
+            self._value_coeff * value_loss -
+            self._entropy_coeff * entropy
+        ).backward()
+
+        act_loss_meter.update(action_loss.item())
+        val_loss_meter.update(value_loss.item())
+        entropy_meter.update(entropy.item())
+
+        self._rollouts.after_update()
+
+        Log.out("ENERGY A2C RUN", {
             'epoch': epoch,
+            'reward': "{:.4f}".format(reward_meter.avg or 0.0),
+            'act_loss': "{:.4f}".format(act_loss_meter.avg or 0.0),
+            'val_loss': "{:.4f}".format(val_loss_meter.avg or 0.0),
+            'entropy': "{:.4f}".format(entropy_meter.avg or 0.0),
         })
 
 
@@ -298,9 +465,9 @@ def train():
     torch.manual_seed(config.get('seed'))
 
     a2c = A2C(config)
-    a2c.init_training()
+
     epoch = 0
     while True:
-        a2c.batch_train(epoch)
+        a2c.run_once(epoch)
         # lm.save()
         epoch += 1
