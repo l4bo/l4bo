@@ -476,7 +476,7 @@ def train():
 
     if config.get('device') != 'cpu':
         torch.cuda.set_device(torch.device(config.get('device')))
-        torch.cuda.manual_seed(config.get('seed'))
+        # torch.cuda.manual_seed(config.get('seed'))
 
     torch.manual_seed(config.get('seed'))
 
