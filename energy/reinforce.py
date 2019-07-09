@@ -179,6 +179,7 @@ class A2C:
         self._pool_size = config.get('energy_reinforce_pool_size')
         self._value_coeff = config.get('energy_reinforce_value_coeff')
         self._entropy_coeff = config.get('energy_reinforce_entropy_coeff')
+        self._grad_norm_max = config.get('energy_reinforce_grad_norm_max')
 
         self._envs = SubprocVecEnv(
             [make_env(
@@ -402,6 +403,20 @@ class A2C:
             self._value_coeff * value_loss -
             self._entropy_coeff * entropy
         ).backward()
+
+        if self._grad_norm_max > 0.0:
+            torch.nn.utils.clip_grad_norm_(
+                self._modules['CNN'].parameters(),
+                self._grad_norm_max,
+            )
+            torch.nn.utils.clip_grad_norm_(
+                self._modules['PH'].parameters(),
+                self._grad_norm_max,
+            )
+            torch.nn.utils.clip_grad_norm_(
+                self._modules['VH'].parameters(),
+                self._grad_norm_max,
+            )
 
         self._optimizer.step()
 
