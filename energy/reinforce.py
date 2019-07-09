@@ -436,7 +436,7 @@ class A2C:
 
 
 def train():
-    os.environ['OMP_NUM_THREADS'] = '1'
+    # os.environ['OMP_NUM_THREADS'] = '1'
 
     parser = argparse.ArgumentParser(description="")
 
@@ -474,11 +474,11 @@ def train():
     if args.device is not None:
         config.override('device', args.device)
 
-    if config.get('device') != 'cpu':
-        torch.cuda.set_device(torch.device(config.get('device')))
-        # torch.cuda.manual_seed(config.get('seed'))
+    # if config.get('device') != 'cpu':
+    #     torch.cuda.set_device(torch.device(config.get('device')))
+    #     torch.cuda.manual_seed(config.get('seed'))
 
-    torch.manual_seed(config.get('seed'))
+    # torch.manual_seed(config.get('seed'))
 
     a2c = A2C(config)
 
