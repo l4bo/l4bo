@@ -18,14 +18,14 @@ class CNN(nn.Module):
             nn.ReLU(),
             nn.Conv2d(16, 32, 4, stride=2),
             nn.ReLU(),
-            nn.Conv2d(32, 32, 4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2, padding=1),
-            nn.ReLU(),
+            # nn.Conv2d(32, 32, 4, stride=2),
+            # nn.ReLU(),
+            # nn.Conv2d(32, 64, 4, stride=2, padding=1),
+            # nn.ReLU(),
         )
 
         self._tail = nn.Sequential(
-            nn.Linear(64, self._hidden_size),
+            nn.Linear(2048, self._hidden_size),
             nn.ReLU(),
             nn.LayerNorm(self._hidden_size),
         )
@@ -41,7 +41,7 @@ class CNN(nn.Module):
     ):
         out = self._convs(observations)
 
-        out = out.view(-1, 64)
+        out = out.view(-1, 2048)
         assert out.size(0) == observations.size(0)
 
         hiddens = self._tail(out)
