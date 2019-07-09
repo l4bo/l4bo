@@ -325,7 +325,7 @@ class A2C:
             with torch.no_grad():
                 obs = self._rollouts._observations[step]
 
-                hiddens = self._modules['CNN'](obs).detach()
+                hiddens = self._modules['CNN'](obs)
                 prd_actions = self._modules['PH'](hiddens)
                 values = self._modules['VH'](hiddens)
 
@@ -365,7 +365,7 @@ class A2C:
         with torch.no_grad():
             obs = self._rollouts._observations[-1]
 
-            hiddens = self._modules['CNN'](obs).detach()
+            hiddens = self._modules['CNN'](obs)
             values = self._modules['VH'](hiddens)
 
             self._rollouts.compute_returns(values.detach())
