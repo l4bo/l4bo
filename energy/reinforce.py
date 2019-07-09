@@ -395,8 +395,7 @@ class A2C:
         value_loss = F.mse_loss(values, rollout_returns)
 
         # Backward pass.
-        for m in self._modules:
-            self._modules[m].zero_grad()
+        self._optimizer.zero_grad()
 
         (
             action_loss +
@@ -404,7 +403,7 @@ class A2C:
             self._entropy_coeff * entropy
         ).backward()
 
-        self._optimizer.step()  
+        self._optimizer.step()
 
         act_loss_meter.update(action_loss.item())
         val_loss_meter.update(value_loss.item())

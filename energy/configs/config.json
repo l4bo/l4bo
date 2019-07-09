@@ -10,7 +10,7 @@
 
   "energy_hidden_size": 128,
 
-  "energy_reinforce_rollout_size": 256,
+  "energy_reinforce_rollout_size": 512,
   "energy_reinforce_pool_size": 16,
   "energy_reinforce_learning_rate": 0.005,
   "energy_reinforce_gamma": 0.99,
