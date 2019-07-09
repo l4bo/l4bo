@@ -404,6 +404,8 @@ class A2C:
             self._entropy_coeff * entropy
         ).backward()
 
+        self._optimizer.step()  
+
         act_loss_meter.update(action_loss.item())
         val_loss_meter.update(value_loss.item())
         entropy_meter.update(entropy.item())
