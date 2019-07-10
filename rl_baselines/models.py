@@ -15,22 +15,25 @@ class Conv(nn.Module):
         H, W, C = input_shape
 
         self.convs = nn.ModuleList()
-        for in_channels, out_channels in zip([C] + sizes, sizes):
+        strides = [4, 2, 1, 1, 1, 1, 1]
+        kernel_size = 1
+        padding = (kernel_size - 1) // 2
+        for in_channels, out_channels, stride in zip([C] + sizes, sizes, strides):
             self.convs.append(
                 nn.Conv2d(
                     in_channels=in_channels,
                     out_channels=out_channels,
-                    kernel_size=3,
-                    stride=2,
-                    padding=1,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
                 )
             )
 
         h = H
         w = W
         for i in range(len(sizes)):
-            h /= 2
-            w /= 2
+            h /= strides[i]
+            w /= strides[i]
             h = int(ceil(h))
             w = int(ceil(w))
 
@@ -39,10 +42,14 @@ class Conv(nn.Module):
         self.out_activation = out_activation
 
     def forward(self, x):
-        if len(x.shape) == 3:
-            x = x.unsqueeze(0)
-        assert len(x.shape) == 4
-        B, H, W, C = x.shape
+        squeeze_batch = False
+        if len(x.shape) == 4:
+            squeeze_batch = True
+            x = x.unsqueeze(1)
+        assert len(x.shape) == 5
+        E, B, H, W, C = x.shape
+        # Fuse environments and steps dimensions
+        x = x.contiguous().view(-1, H, W, C)
         # Pytorch uses C, H, W for its convolution
         x = x.permute(0, 3, 1, 2)
         for conv in self.convs:
@@ -50,10 +57,16 @@ class Conv(nn.Module):
             x = self.activation(x)
 
         # Flatten
-        x = x.reshape(B, -1)
+        x = x.view(E * B, -1)
         x = self.out(x)
         if self.out_activation:
             x = self.out_activate(x)
+        x = x.view(E, B, -1)
+        if x.shape[-1] == 1:
+            # Don't put and extra dimension if nothing is left.
+            x = x.squeeze(-1)
+        if squeeze_batch:
+            x = x.squeeze(1)
         return x
 
 
@@ -99,3 +112,13 @@ class ContinuousPolicy(nn.Module):
     def forward(self, state):
         mu = self.model(state)
         return MultivariateNormal(mu, torch.diag(self.log_std.exp()))
+
+
+class ValueModel(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        x = self.model(x)
+        return x.squeeze(-1)

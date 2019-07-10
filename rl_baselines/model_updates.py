@@ -18,12 +18,9 @@ class ModelUpdate(nn.Module):
         raise NotImplementedError
 
     def batch(self, episodes):
-        batch_obs = [item for episode in episodes for item in episode.obs]
-        batch_acts = [item for episode in episodes for item in episode.act]
         weights = self.baseline(episodes)
-        obs = torch.Tensor(batch_obs)
-        acts = torch.stack(batch_acts, dim=0)
-        return obs, acts, weights
+        # Remove last observation, it's not needed for the update anymore
+        return episodes.obs[:, :-1, ...], episodes.acts, weights
 
 
 class PolicyUpdate(ModelUpdate):
@@ -52,7 +49,7 @@ class ValueUpdate(ModelUpdate):
 
         for i in range(self.iters):
             values = self.model(obs)
-            loss = F.mse_loss(values, returns.unsqueeze(1))
+            loss = F.mse_loss(values, returns)
 
             self.optimizer.zero_grad()
             loss.backward()

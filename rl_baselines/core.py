@@ -7,7 +7,7 @@ import datetime
 import os
 import sys
 from rl_baselines.environment import SubprocVecEnv, make_single_env
-from rl_baselines.models import ContinuousPolicy, DiscretePolicy, MLP, Conv
+from rl_baselines.models import ContinuousPolicy, DiscretePolicy, MLP, Conv, ValueModel
 
 
 def set_logger(logger):
@@ -44,82 +44,105 @@ if not logger.handlers:
     logdir = set_logger(logger)
 
 
-class Episode:
-    def __init__(self):
-        self.obs = []
-        self.act = []
-        self.rew = []
+class Episodes:
+    def __init__(self, num_env, num_steps, obs_shape, act_shape):
+        self.num_steps = num_steps
+        self.num_env = num_env
+        self.obs = torch.zeros((num_env, num_steps + 1, *obs_shape))
+        self.acts = torch.zeros((num_env, num_steps, *act_shape))
+        self.rews = torch.zeros((num_env, num_steps))
+        self.dones = torch.zeros((num_env, num_steps))
 
-    def end(self):
-        self.ret = sum(self.rew)
-        self.len = len(self.rew)
-        assert len(self.rew) == len(self.obs) == len(self.act)
+    def get_buffer(self, name):
+        if not hasattr(self, name):
+            setattr(self, name, torch.zeros((self.num_env, self.num_steps)))
+        return getattr(self, name)
 
-    def __len__(self):
-        return self.len
+    def gae_advantages(self, values, gamma, lambda_):
+        advantages = self.get_buffer("advs")
+        lastgaelam = 0
+        for t in range(self.num_steps - 1, -1, -1):  # nsteps-1 ... 0
+            nextdone = self.dones[:, t + 1] if t + 1 < self.num_steps else 0
+            nextvals = values[:, t + 1]
+            nextnotdone = 1 - nextdone
+            delta = self.rews[:, t] + gamma * nextvals * nextnotdone - values[:, t]
+            advantages[:, t] = lastgaelam = (
+                delta + gamma * lambda_ * nextnotdone * lastgaelam
+            )
+        return advantages
+
+    def discounted_returns(self, gamma):
+        rets = self.get_buffer("rets")
+        curr_rets = 0
+        for t in range(self.num_steps - 1, -1, -1):  # nsteps-1 ... 0
+            nextdone = self.dones[:, t + 1] if t + 1 < self.num_steps else 0
+            nextnotdone = 1 - nextdone
+            curr_rets = self.rews[:, t] + gamma * curr_rets * nextnotdone
+            rets[:, t] = curr_rets
+        return rets
+
+    def stats(self):
+        stats = torch.zeros((self.num_env, 3))
+        # 0: actual return, 1: length, 2: is it a full_episode
+        all_returns = []
+        all_lengths = []
+        for t in range(self.num_steps - 2, -1, -1):
+            for i in range(self.num_env):
+                if self.dones[i, t]:
+                    if stats[i, 2]:
+                        all_returns.append(stats[i, 0])
+                        all_lengths.append(stats[i, 1])
+                    stats[i, 2] = 1
+            nextdone = self.dones[:, t + 1] if t + 1 < self.num_steps else 0
+            nextnotdone = 1 - nextdone
+            stats[:, 0] = self.rews[:, t] + nextnotdone * stats[:, 0]
+            stats[:, 1] = 1 + nextnotdone * stats[:, 1]
+        for i in range(self.num_env):
+            if stats[i, 2]:
+                all_returns.append(stats[i, 0])
+                all_lengths.append(stats[i, 1])
+        return np.array(all_returns), np.array(all_lengths)
 
 
 def gather_episodes(env, batch_size, policy):
     episodes = []
 
     num_envs = env.num_envs
-
-    batch_episodes = [Episode() for i in range(num_envs)]
+    episodes = Episodes(
+        num_envs, batch_size, env.observation_space.shape, env.action_space.shape
+    )
 
     # reset episode-specific variables
     obs = env.reset()  # first obs comes from starting distribution
-    done = False  # signal from environment that episode is over
-    step = 0
-    stops = [False for i in range(num_envs)]
-
-    while True:
-        for i in range(num_envs):
-            if stops[i]:
-                continue
-            batch_episodes[i].obs.append(obs[i])
-
+    obs = torch.from_numpy(obs).float()
+    for step in range(batch_size):
+        episodes.obs[:, step] = obs
         # act in the environment
-        x = torch.from_numpy(obs).float()
-        dist = policy(x)
-        act = dist.sample()
-        obs, rew, done, _ = env.step(act.cpu().numpy())
+        dist = policy(obs)
+        acts = dist.sample()
+        obs, rews, dones, _ = env.step(acts.cpu().numpy())
+        obs = torch.from_numpy(obs).float()
 
-        # env.render()
+        episodes.acts[:, step] = acts  # Already torch tensor
+        episodes.rews[:, step] = torch.from_numpy(rews)
+        episodes.dones[:, step] = torch.from_numpy(dones)
 
-        # save action, reward
-        for i in range(num_envs):
-            if stops[i]:
-                continue
-            batch_episodes[i].act.append(act[i])
-            batch_episodes[i].rew.append(rew[i])
+    # Push last observation needed for advantages
+    episodes.obs[:, batch_size] = obs
 
-            if done[i]:
-                # if episode is over, record info about episode
-                batch_episodes[i].end()
-                episodes.append(batch_episodes[i])
-
-                # reset episode-specific variables
-                spec_obs = env.reset(i)
-                obs[i] = spec_obs
-                batch_episodes[i] = Episode()
-
-                if step > batch_size:
-                    stops[i] = True
-                    if all(stops):
-                        return episodes
-        step += num_envs - sum(stops)
     return episodes
 
 
 def train_one_epoch(env, batch_size, render, policy_update, device):
 
     policy = policy_update.policy
+
     # collect experience by acting in the environment with current policy
     # start = datetime.datetime.now()
-
-    episodes = gather_episodes(env, batch_size, policy)
-
+    num_steps = batch_size // env.num_envs
+    episodes = gather_episodes(env, num_steps, policy)
     # end_rollout = datetime.datetime.now()
+
     losses = policy_update.update(episodes)
 
     # logger.debug(f"Rollout time {end_rollout - start}")
@@ -140,8 +163,6 @@ def default_model(env, hidden_sizes, n_acts):
         1,
         3,
     ], f"This example only works for envs with Box(n,) or Box(h, w, c) not {env.observation_space} observation spaces."
-    obs_dim = env.observation_space.shape[0]
-
     if len(env.observation_space.shape) == 1:
         obs_dim = env.observation_space.shape[0]
         model = MLP(sizes=[obs_dim] + hidden_sizes + [n_acts])
@@ -179,7 +200,7 @@ def create_models(env, hidden_sizes, pi_lr, vf_lr):
         )
     poptimizer = torch.optim.Adam(policy.parameters(), lr=pi_lr)
 
-    value = default_model(env, hidden_sizes, 1)
+    value = ValueModel(default_model(env, hidden_sizes, 1))
     voptimizer = torch.optim.Adam(value.parameters(), lr=vf_lr)
     return (policy, poptimizer), (value, voptimizer)
 
@@ -218,8 +239,9 @@ def solve(
         losses, episodes = train_one_epoch(
             env, batch_size, render, policy_update=policy_update, device=device
         )
-        rets = np.mean([episode.ret for episode in episodes])
-        lens = np.mean([episode.len for episode in episodes])
+        rets, lens = episodes.stats()
+        rets = rets.mean()
+        lens = lens.mean()
         loss_string = "\t".join(
             [f"{loss_name}: {loss:.3f}" for loss_name, loss in losses.items()]
         )
@@ -227,7 +249,7 @@ def solve(
             "epoch: %3d \t %s \t return: %.3f \t ep_len: %.3f"
             % (epoch, loss_string, rets, lens)
         )
-        env_step += sum([episode.len for episode in episodes])
+        env_step += batch_size * env.num_envs
         writer.add_scalar(f"{env_name}/episode_reward", rets, global_step=env_step)
         writer.add_scalar(f"{env_name}/episode_length", lens, global_step=env_step)
         if rets > max_ret:

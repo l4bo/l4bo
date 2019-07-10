@@ -20,7 +20,7 @@ class REINFORCE(PolicyUpdate):
 if __name__ == "__main__":
     import argparse
     from rl_baselines.core import solve, create_models, make_env
-    from rl_baselines.baselines import FullReturnBaseline, FutureReturnBaseline
+    from rl_baselines.baselines import FutureReturnBaseline
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-name", "--env", type=str, default="CartPole-v0")

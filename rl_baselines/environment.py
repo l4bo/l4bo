@@ -141,7 +141,6 @@ class WarpFrame(gym.ObservationWrapper):
         frame = cv2.resize(
             frame, (self.width, self.height), interpolation=cv2.INTER_AREA
         )
-        print(frame)
         return frame[:, :, None]
 
 
@@ -158,7 +157,7 @@ def unwrap(env):
 
 def make_single_env(env_name):
     if "NoFrameskip" in env_name:
-        env = make_atari(env_name)
+        env = wrap_deepmind(make_atari(env_name))
     else:
         env = gym.make(env_name)
 
