@@ -1,4 +1,5 @@
 import argparse
+import numpy as np
 import gym
 import torch
 
@@ -6,7 +7,7 @@ from energy.models.mlp import ESMLP
 
 from energy.tools.vec_env.subproc_vec_env import SubprocVecEnv
 
-# from torch.distributions import Categorical
+from torch.distributions import Categorical
 
 from utils.config import Config
 # from utils.meter import Meter
@@ -38,6 +39,7 @@ class ES:
         self._device = torch.device(config.get('device'))
 
         self._alpha = config.get('energy_es_alpha')
+        self._sigma = config.get('energy_es_sigma')
         self._pool_size = config.get('energy_es_pool_size')
 
         self._envs = SubprocVecEnv(
@@ -49,19 +51,24 @@ class ES:
         )
 
         self._obs_shape = self._envs.observation_space.shape
-        observation_size = self._envs.observation_space.shape[0]
+        self._observation_size = self._envs.observation_space.shape[0]
+        self._action_size = self._envs.action_space.n
 
         self._modules = [
-            ESMLP(self._config, observation_size).to(self._device)
+            ESMLP(
+                self._config, self._observation_size, self._action_size,
+            ).to(self._device)
             for i in range(self._pool_size)
         ]
 
         Log.out('ES initialized', {
-            "pool_size": self._config.get('energy_reinforce_pool_size'),
+            "pool_size": self._config.get('energy_es_pool_size'),
         })
 
         for m in self._modules:
             m.eval()
+
+        self._reward_tracker = None
 
     def run_once(
             self,
@@ -74,15 +81,58 @@ class ES:
                 noises += [m.noise()]
                 m.apply_noise(noises[-1])
 
-            import pdb; pdb.set_trace()
+            pool_dones = [False] * self._pool_size
+            pool_rewards = [0.0] * self._pool_size
+
+            observations = self._envs.reset()
+
+            obs = torch.from_numpy(
+                observations,
+            ).float().to(self._device)
 
             all_done = False
-            observations = self._env.reset()
-
             while(not all_done):
+                actions = []
                 for i, m in enumerate(self._modules):
+                    prd_actions = m(obs[i].unsqueeze(0))
+                    m = Categorical(torch.exp(prd_actions))
+                    actions += [m.sample().cpu().numpy()]
 
-            Log.out('FOO')
+                observations, rewards, dones, infos = self._envs.step(
+                    np.squeeze(np.array(actions), 1),
+                )
+
+                all_done = True
+                for i in range(self._pool_size):
+                    if not pool_dones[i]:
+                        pool_rewards[i] += rewards[i]
+                    pool_dones[i] = pool_dones[i] or dones[i]
+                    all_done = all_done and pool_dones[i]
+
+            rewards = torch.tensor(pool_rewards)
+            advantages = (rewards - torch.mean(rewards)) \
+                / (torch.std(rewards) + 10e-7)
+
+            final = self._modules[0].zero_noise()
+            for i in range(self._pool_size):
+                for name in final.keys():
+                    final[name] += noises[i][name] * advantages[i] * \
+                        self._alpha / (self._pool_size * self._sigma)
+
+            for i, m in enumerate(self._modules):
+                m.revert_noise(noises[i])
+                m.apply_noise(final)
+
+            if self._reward_tracker is None:
+                self._reward_tracker = rewards.mean()
+            self._reward_tracker = \
+                0.99 * self._reward_tracker + 0.01 * rewards.mean()
+
+            Log.out("ENERGY ES RUN", {
+                'epoch': epoch,
+                'reward': "{:.4f}".format(rewards.mean()),
+                'tracker': "{:.4f}".format(self._reward_tracker),
+            })
 
 
 def train():

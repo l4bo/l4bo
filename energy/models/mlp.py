@@ -40,6 +40,7 @@ class ESMLP(nn.Module):
             self,
             config,
             observation_size,
+            action_size,
     ):
         super().__init__()
 
@@ -50,7 +51,7 @@ class ESMLP(nn.Module):
 
         self._l1 = nn.Linear(observation_size, self._hidden_size)
         self._l2 = nn.Linear(self._hidden_size, self._hidden_size)
-        self._l3 = nn.Linear(self._hidden_size, self._hidden_size)
+        self._l3 = nn.Linear(self._hidden_size, action_size)
 
         self._mlp = nn.Sequential(
             self._l1,
@@ -66,6 +67,15 @@ class ESMLP(nn.Module):
             self,
     ):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def zero_noise(
+            self,
+    ):
+        noise = {}
+        for name, param in self.named_parameters():
+            noise[name] = self._config.get('energy_es_sigma') * \
+                torch.zeros(param.size()).to(self._device)
+        return noise
 
     def noise(
             self,
