@@ -6,8 +6,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical, MultivariateNormal
 from torch.utils.tensorboard import SummaryWriter
+from math import ceil
 import logging
+import datetime
 import os
+from rl_baselines.environment import SubprocVecEnv
 
 
 def set_logger(logger):
@@ -47,6 +50,59 @@ def set_logger(logger):
 logger = logging.getLogger("rl-baselines")
 if not logger.handlers:
     logdir = set_logger(logger)
+
+
+class Conv(nn.Module):
+    def __init__(
+        self, input_shape, sizes, activation=nn.ReLU(inplace=True), out_activation=None
+    ):
+        super().__init__()
+
+        self.input_shape = input_shape
+        self.activation = activation
+        H, W, C = input_shape
+
+        self.convs = nn.ModuleList()
+        for in_channels, out_channels in zip([C] + sizes, sizes):
+            self.convs.append(
+                nn.Conv2d(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                )
+            )
+
+        h = H
+        w = W
+        for i in range(len(sizes)):
+            h /= 2
+            w /= 2
+            h = int(ceil(h))
+            w = int(ceil(w))
+
+        in_ = h * w * sizes[-1]
+        self.out = nn.Linear(in_, sizes[-1])
+        self.out_activation = out_activation
+
+    def forward(self, x):
+        if len(x.shape) == 3:
+            x = x.unsqueeze(0)
+        assert len(x.shape) == 4
+        B, H, W, C = x.shape
+        # Pytorch uses C, H, W for its convolution
+        x = x.permute(0, 3, 1, 2)
+        for conv in self.convs:
+            x = conv(x)
+            x = self.activation(x)
+
+        # Flatten
+        x = x.reshape(B, -1)
+        x = self.out(x)
+        if self.out_activation:
+            x = self.out_activate(x)
+        return x
 
 
 class MLP(nn.Module):
@@ -190,16 +246,8 @@ class ModelUpdate(nn.Module):
         self.optimizer = optimizer
         self.iters = iters
 
-    def loss(self, model, episodes):
-        raise NotImplementedError
-
     def update(self, episodes):
-        for i in range(self.iters):
-            self.optimizer.zero_grad()
-            loss = self.loss(self.model, episodes)
-            loss.backward()
-            self.optimizer.step()
-        return {self.loss_name: loss}
+        raise NotImplementedError
 
     def batch(self, episodes):
         batch_obs = [item for episode in episodes for item in episode.obs]
@@ -231,10 +279,17 @@ class ValueUpdate(ModelUpdate):
             self.baseline, DiscountedReturnBaseline
         ), "Value models need to learn discounted returns"
 
-    def loss(self, model, episodes):
+    def update(self, episodes):
         obs, _, returns = self.batch(episodes)
-        values = model(obs)
-        return F.mse_loss(values, returns.unsqueeze(1))
+
+        for i in range(self.iters):
+            values = self.model(obs)
+            loss = F.mse_loss(values, returns.unsqueeze(1))
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+        return {self.loss_name: loss}
 
 
 class ActorCriticUpdate(nn.Module):
@@ -277,52 +332,74 @@ class Episode:
         return self.len
 
 
-def train_one_epoch(env, batch_size, render, policy_update):
+def gather_episodes(env, batch_size, policy):
     episodes = []
-    episode = Episode()
+
+    num_envs = env.num_envs
+
+    batch_episodes = [Episode() for i in range(num_envs)]
 
     # reset episode-specific variables
     obs = env.reset()  # first obs comes from starting distribution
     done = False  # signal from environment that episode is over
+    step = 0
+    stops = [False for i in range(num_envs)]
+
+    while True:
+        for i in range(num_envs):
+            if stops[i]:
+                continue
+            batch_episodes[i].obs.append(obs[i])
+
+        # act in the environment
+        x = torch.from_numpy(obs).float()
+        dist = policy(x)
+        act = dist.sample()
+        obs, rew, done, _ = env.step(act.cpu().numpy())
+
+        # save action, reward
+        for i in range(num_envs):
+            if stops[i]:
+                continue
+            batch_episodes[i].act.append(act[i])
+            batch_episodes[i].rew.append(rew[i])
+
+            if done[i]:
+                # if episode is over, record info about episode
+                batch_episodes[i].end()
+                episodes.append(batch_episodes[i])
+
+                # reset episode-specific variables
+                spec_obs = env.reset(i)
+                obs[i] = spec_obs
+                batch_episodes[i] = Episode()
+
+                if step > batch_size:
+                    stops[i] = True
+                    if all(stops):
+                        return episodes
+        step += num_envs - sum(stops)
+    return episodes
+
+
+def train_one_epoch(env, batch_size, render, policy_update, device):
 
     policy = policy_update.policy
     # collect experience by acting in the environment with current policy
-    step = 0
-    while True:
-        # save obs
-        episode.obs.append(obs)
+    # start = datetime.datetime.now()
 
-        # act in the environment
-        dist = policy(torch.from_numpy(obs).float())
-        act = dist.sample()
-        obs, rew, done, _ = env.step(act.numpy())
+    episodes = gather_episodes(env, batch_size, policy)
 
-        # save action, reward
-        episode.act.append(act)
-        episode.rew.append(rew)
-
-        if done:
-            # if episode is over, record info about episode
-            episode.end()
-            episodes.append(episode)
-
-            # reset episode-specific variables
-            obs, done = env.reset(), False
-            episode = Episode()
-
-            # end experience loop if we have enough of it
-            if step > batch_size:
-                break
-        step += 1
-
+    # end_rollout = datetime.datetime.now()
     losses = policy_update.update(episodes)
+
+    # logger.debug(f"Rollout time {end_rollout - start}")
+    # logger.debug(f"Update time {datetime.datetime.now() - end_rollout}")
 
     return losses, episodes
 
 
-def create_models(env_name, hidden_sizes, lr):
-    # make environment, check spaces, get obs / act dims
-    env = gym.make(env_name)
+def default_model(env, hidden_sizes, n_acts):
     assert isinstance(
         env.observation_space, Box
     ), "This example only works for envs with continuous state spaces."
@@ -330,34 +407,62 @@ def create_models(env_name, hidden_sizes, lr):
         env.action_space, (Discrete, Box)
     ), "This example only works for envs with discrete/box action spaces."
 
-    assert (
-        len(env.observation_space.shape) == 1
-    ), f"This example only works for envs with Box(n,) not {env.observation_space} observation spaces."
+    assert len(env.observation_space.shape) in [
+        1,
+        3,
+    ], f"This example only works for envs with Box(n,) or Box(h, w, c) not {env.observation_space} observation spaces."
     obs_dim = env.observation_space.shape[0]
+
+    if len(env.observation_space.shape) == 1:
+        obs_dim = env.observation_space.shape[0]
+        model = MLP(sizes=[obs_dim] + hidden_sizes + [n_acts])
+    elif len(env.observation_space.shape) == 3:
+        model = Conv(
+            input_shape=env.observation_space.shape, sizes=hidden_sizes + [n_acts]
+        )
+    return model
+
+
+def create_models(env_name, num_envs, hidden_sizes, pi_lr, vf_lr):
+    # make environment, check spaces, get obs / act dims
+    env = SubprocVecEnv([lambda: gym.make(env_name) for i in range(num_envs)])
+
     if isinstance(env.action_space, Discrete):
         n_acts = env.action_space.n
-        model = MLP(sizes=[obs_dim] + hidden_sizes + [n_acts])
-        policy = DiscretePolicy(model)
     elif isinstance(env.action_space, Box):
         assert (
             len(env.action_space.shape) == 1
-        ), "Can't handle Box action_shape with more than 1 dimension"
+        ), f"This example only works for envs with Box(n,) not {env.action_space} action spaces."
         n_acts = env.action_space.shape[0]
-        model = MLP(sizes=[obs_dim] + hidden_sizes + [n_acts])
+    model = default_model(env, hidden_sizes, n_acts)
+    if isinstance(env.action_space, Discrete):
+        policy = DiscretePolicy(model)
+    elif isinstance(env.action_space, Box):
         policy = ContinuousPolicy(model, env.action_space.shape)
+
     else:
         raise NotImplementedError(
             "We don't handle action spaces different from box/discrete yet."
         )
-    poptimizer = torch.optim.Adam(policy.parameters(), lr=lr)
-    value = MLP(sizes=[obs_dim] + hidden_sizes + [1])
-    voptimizer = torch.optim.Adam(value.parameters(), lr=lr)
+    poptimizer = torch.optim.Adam(policy.parameters(), lr=pi_lr)
+
+    value = default_model(env, hidden_sizes, 1)
+    voptimizer = torch.optim.Adam(value.parameters(), lr=vf_lr)
     return env, (policy, poptimizer), (value, voptimizer)
 
 
 def solve(
-    env_name, env, policy_update, logdir, epochs=100, batch_size=5000, render=False
+    env_name,
+    env,
+    policy_update,
+    logdir,
+    epochs=100,
+    batch_size=5000,
+    render=False,
+    device=None,
 ):
+    if device is None:
+        device = "cpu"
 
     writer = SummaryWriter(log_dir=logdir)
     env_step = 0
@@ -366,17 +471,19 @@ def solve(
     root = logging.getLogger()
     root.handlers = []
 
+    parameters = sum(p.numel() for p in policy_update.parameters())
     logger.debug(f"Attempting to solve {env_name}")
     logger.debug(f"Epochs: {epochs}")
     logger.debug(f"Batch_size: {batch_size}")
     logger.debug(f"Policy Update: {policy_update}")
+    logger.debug(f"Parameters: {parameters}")
     logger.debug(f"Reward threshold: {env.spec.reward_threshold}")
 
     max_ret = -1e9
 
     for epoch in range(epochs):
         losses, episodes = train_one_epoch(
-            env, batch_size, render, policy_update=policy_update
+            env, batch_size, render, policy_update=policy_update, device=device
         )
         rets = np.mean([episode.ret for episode in episodes])
         lens = np.mean([episode.len for episode in episodes])
@@ -397,5 +504,8 @@ def solve(
             max_ret = rets
         if env.spec.reward_threshold and rets > env.spec.reward_threshold:
             logger.info(f"{env_name}: Solved !")
+            logger.info(
+                f"{env_name}: Check out winning agent `python -m rl_baselines.test_agent --model={filename} --env={env_name}`"
+            )
             return True
     return False if env.spec.reward_threshold else None
