@@ -1,11 +1,10 @@
 import argparse
-import os
 import gym
 import torch
-import torch.nn.functional as F
 import torch.optim as optim
 
-from energy.models.cnn import CNN
+# from energy.models.cnn import CNN
+from energy.models.mlp import MLP
 from energy.models.heads import PH, VH
 
 from energy.tools.atari_wrappers import make_atari, wrap_deepmind
@@ -22,12 +21,13 @@ from utils.log import Log
 def make_env(env_id, seed, rank):
     def _thunk():
         env = gym.make(env_id)
-        is_atari = isinstance(env.unwrapped, gym.envs.atari.atari_env.AtariEnv)
-        if is_atari:
-            env = make_atari(env_id)
+        # is_atari = \
+        #     isinstance(env.unwrapped, gym.envs.atari.atari_env.AtariEnv)
+        # if is_atari:
+        #     env = make_atari(env_id)
         env.seed(seed + rank)
-        if is_atari:
-            env = wrap_deepmind(env, frame_stack=True)
+        # if is_atari:
+        #     env = wrap_deepmind(env, frame_stack=True)
         return env
 
     return _thunk
@@ -171,8 +171,6 @@ class PPO:
         self._config = config
 
         self._device = torch.device(config.get('device'))
-        self._save_dir = config.get('save_dir')
-        self._load_dir = config.get('load_dir')
 
         self._learning_rate = config.get('energy_reinforce_learning_rate')
         self._rollout_size = config.get('energy_reinforce_rollout_size')
@@ -192,125 +190,63 @@ class PPO:
             ) for i in range(self._pool_size)],
         )
 
-        self._obs_shape = (
-            self._envs.observation_space.shape[2],
-            self._envs.observation_space.shape[0],
-            self._envs.observation_space.shape[1],
-        )
-        channel_count = self._envs.observation_space.shape[2]
+        self._obs_shape = self._envs.observation_space.shape
+        # self._obs_shape = (
+        #     self._envs.observation_space.shape[2],
+        #     self._envs.observation_space.shape[1],
+        #     self._envs.observation_space.shape[0],
+        # )
+        # channel_count = self._envs.observation_space.shape[2]
+        observation_size = self._envs.observation_space.shape[0]
 
         self._rollouts = Rollouts(self._config, self._obs_shape)
 
         observations = self._envs.reset()
 
+        # self._rollouts._observations[0].copy_(
+        #     torch.from_numpy(
+        #         observations,
+        #     ).float().transpose(3, 1).to(self._device) / 255.0,
+        # )
         self._rollouts._observations[0].copy_(
             torch.from_numpy(
                 observations,
-            ).float().transpose(3, 1).to(self._device) / 255.0,
+            ).float().to(self._device),
         )
         self._episode_rewards = [0.0] * self._pool_size
 
         self._modules = {
-            'CNN': CNN(self._config, channel_count).to(self._device),
+            # 'CNN': CNN(self._config, channel_count).to(self._device),
+            'MLP': MLP(self._config, observation_size).to(self._device),
             'PH': PH(self._config, self._envs.action_space.n).to(self._device),
             'VH': VH(self._config).to(self._device),
         }
 
         Log.out(
             "Initializing PPO modules", {
-                'paramater_count_CNN': self._modules['CNN'].parameters_count(),
-                'paramater_count_PH': self._modules['PH'].parameters_count(),
-                'paramater_count_VH': self._modules['VH'].parameters_count(),
+                # 'parameter_CNN': self._modules['CNN'].parameters_count(),
+                'parameter_MLP': self._modules['MLP'].parameters_count(),
+                'parameter_PH': self._modules['PH'].parameters_count(),
+                'parameter_VH': self._modules['VH'].parameters_count(),
             },
         )
 
         self._optimizer = optim.Adam(
             [
-                {'params': self._modules['CNN'].parameters()},
+                # {'params': self._modules['CNN'].parameters()},
+                {'params': self._modules['MLP'].parameters()},
                 {'params': self._modules['PH'].parameters()},
                 {'params': self._modules['VH'].parameters()},
             ],
             lr=self._learning_rate,
         )
 
-        self._reward_tracker = -21.0
+        self._reward_tracker = None
 
         Log.out('PPO initialized', {
             "pool_size": self._config.get('energy_reinforce_pool_size'),
             "rollout_size": self._config.get('energy_reinforce_rollout_size'),
         })
-
-    def load(
-            self,
-            training=True,
-    ):
-        super().load()
-
-        if self._load_dir:
-            if os.path.isfile(
-                    self._load_dir + "/model.pt",
-            ):
-                Log.out(
-                    "Loading models", {
-                        'load_dir': self._load_dir,
-                    })
-                self._modules['CNN'].load_state_dict(
-                    torch.load(
-                        self._load_dir + "/module_CNN.pt",
-                        map_location=self._device,
-                    ),
-                )
-                self._modules['PH'].load_state_dict(
-                    torch.load(
-                        self._load_dir + "/module_PH.pt",
-                        map_location=self._device,
-                    ),
-                )
-                self._modules['VH'].load_state_dict(
-                    torch.load(
-                        self._load_dir + "/module_VH.pt",
-                        map_location=self._device,
-                    ),
-                )
-
-            if training:
-                if os.path.isfile(
-                        self._load_dir + "/optimizer.pt",
-                ):
-                    self._optimizer.load_state_dict(
-                        torch.load(
-                            self._load_dir + "/optimizer.pt",
-                            map_location=self._device,
-                        ),
-                    )
-
-        return self
-
-    def save(
-            self,
-    ):
-        if self._save_dir:
-            Log.out(
-                "Saving models", {
-                    'save_dir': self._save_dir,
-                })
-
-            torch.save(
-                self._modules['CNN'].state_dict(),
-                self._save_dir + "/module_CNN.pt",
-            )
-            torch.save(
-                self._modules['PH'].state_dict(),
-                self._save_dir + "/module_PH.pt",
-            )
-            torch.save(
-                self._modules['VH'].state_dict(),
-                self._save_dir + "/module_VH.pt",
-            )
-            torch.save(
-                self._optimizer.state_dict(),
-                self._save_dir + "/optimizer.pt",
-            )
 
     def run_once(
             self,
@@ -330,7 +266,8 @@ class PPO:
             with torch.no_grad():
                 obs = self._rollouts._observations[step]
 
-                hiddens = self._modules['CNN'](obs)
+                # hiddens = self._modules['CNN'](obs)
+                hiddens = self._modules['MLP'](obs)
                 prd_actions = self._modules['PH'](hiddens)
                 values = self._modules['VH'](hiddens)
 
@@ -338,17 +275,20 @@ class PPO:
                 actions = m.sample().view(-1, 1)
 
                 observations, rewards, dones, infos = self._envs.step(
-                    actions.cpu().numpy(),
+                    actions.squeeze(1).cpu().numpy(),
                 )
 
+                # observations = torch.from_numpy(
+                #     observations,
+                # ).float().transpose(3, 1).to(self._device) / 255.0
                 observations = torch.from_numpy(
                     observations,
-                ).float().transpose(3, 1).to(self._device) / 255.0
+                ).float().to(self._device)
 
                 log_probs = prd_actions.gather(1, actions)
 
                 for i, r in enumerate(rewards):
-                    self._episode_rewards[i] += r
+                    self._episode_rewards[i] += r / 500.0
                     if dones[i]:
                         reward_meter.update(self._episode_rewards[i])
                         self._episode_rewards[i] = 0.0
@@ -360,7 +300,7 @@ class PPO:
                     log_probs.detach(),
                     values.detach(),
                     torch.tensor(
-                        [r for r in rewards], dtype=torch.float,
+                        [r/500.0 for r in rewards], dtype=torch.float,
                     ).unsqueeze(1).to(self._device),
                     torch.tensor(
                         [[0.0] if d else [1.0] for d in dones],
@@ -370,7 +310,8 @@ class PPO:
         with torch.no_grad():
             obs = self._rollouts._observations[-1]
 
-            hiddens = self._modules['CNN'](obs)
+            # hiddens = self._modules['CNN'](obs)
+            hiddens = self._modules['MLP'](obs)
             values = self._modules['VH'](hiddens)
 
             self._rollouts.compute_returns(values.detach())
@@ -392,7 +333,8 @@ class PPO:
                     rollout_log_probs, \
                     rollout_advantages = batch
 
-                hiddens = self._modules['CNN'](rollout_observations)
+                # hiddens = self._modules['CNN'](rollout_observations)
+                hiddens = self._modules['MLP'](rollout_observations)
                 prd_actions = self._modules['PH'](hiddens)
                 values = self._modules['VH'](hiddens)
 
@@ -407,7 +349,8 @@ class PPO:
                     rollout_advantages,
                 ).mean()
 
-                value_loss = F.mse_loss(values, rollout_returns)
+                # value_loss = F.mse_loss(values, rollout_returns)
+                value_loss = (rollout_returns.detach() - values).pow(2).mean()
 
                 # Backward pass.
                 self._optimizer.zero_grad()
@@ -420,7 +363,8 @@ class PPO:
 
                 if self._grad_norm_max > 0.0:
                     torch.nn.utils.clip_grad_norm_(
-                        self._modules['CNN'].parameters(),
+                        # self._modules['CNN'].parameters(),
+                        self._modules['MLP'].parameters(),
                         self._grad_norm_max,
                     )
                     torch.nn.utils.clip_grad_norm_(
@@ -441,17 +385,19 @@ class PPO:
         self._rollouts.after_update()
 
         if reward_meter.avg:
+            if self._reward_tracker is None:
+                self._reward_tracker = reward_meter.avg
             self._reward_tracker = \
                 0.99 * self._reward_tracker + 0.01 * reward_meter.avg
 
-        Log.out("ENERGY PPO RUN", {
-            'epoch': epoch,
-            'reward': "{:.4f}".format(reward_meter.avg or 0.0),
-            'act_loss': "{:.4f}".format(act_loss_meter.avg or 0.0),
-            'val_loss': "{:.4f}".format(val_loss_meter.avg or 0.0),
-            'entropy': "{:.4f}".format(entropy_meter.avg or 0.0),
-            'tracker': "{:.4f}".format(self._reward_tracker),
-        })
+            Log.out("ENERGY PPO RUN", {
+                'epoch': epoch,
+                'reward': "{:.4f}".format(reward_meter.avg or 0.0),
+                'act_loss': "{:.4f}".format(act_loss_meter.avg or 0.0),
+                'val_loss': "{:.4f}".format(val_loss_meter.avg or 0.0),
+                'entropy': "{:.4f}".format(entropy_meter.avg or 0.0),
+                'tracker': "{:.4f}".format(self._reward_tracker),
+            })
 
 
 def train():
@@ -464,14 +410,6 @@ def train():
         type=str, help="path to the config file",
     )
     parser.add_argument(
-        '--save_dir',
-        type=str, help="config override",
-    )
-    parser.add_argument(
-        '--load_dir',
-        type=str, help="config override",
-    )
-    parser.add_argument(
         '--device',
         type=str, help="config override",
     )
@@ -480,16 +418,6 @@ def train():
 
     config = Config.from_file(args.config_path)
 
-    if args.load_dir is not None:
-        config.override(
-            'load_dir',
-            os.path.expanduser(args.load_dir),
-        )
-    if args.save_dir is not None:
-        config.override(
-            'save_dir',
-            os.path.expanduser(args.save_dir),
-        )
     if args.device is not None:
         config.override('device', args.device)
 
