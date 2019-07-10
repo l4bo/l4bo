@@ -7,7 +7,7 @@ import torch.optim as optim
 from energy.models.mlp import MLP
 from energy.models.heads import PH, VH
 
-from energy.tools.atari_wrappers import make_atari, wrap_deepmind
+# from energy.tools.atari_wrappers import make_atari, wrap_deepmind
 from energy.tools.vec_env.subproc_vec_env import SubprocVecEnv
 
 from torch.distributions import Categorical
@@ -432,5 +432,4 @@ def train():
     epoch = 0
     while True:
         ppo.run_once(epoch)
-        # lm.save()
         epoch += 1

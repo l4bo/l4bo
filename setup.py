@@ -13,6 +13,7 @@ setup(
     entry_points={
         'console_scripts': [
             'energy_reinforce_train=energy.reinforce:train',
+            'energy_es_train=energy.es:train',
         ],
     },
 )
