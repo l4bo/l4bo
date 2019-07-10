@@ -2,17 +2,13 @@ import unittest
 import logging
 import multiprocessing
 import torch
-from rl_baselines.core import (
-    create_models,
-    logdir,
-    solve,
-    logger,
+from rl_baselines.core import create_models, logdir, solve, logger, Episode, make_env
+from rl_baselines.baselines import (
     FullReturnBaseline,
     FutureReturnBaseline,
     DiscountedReturnBaseline,
     GAEBaseline,
     discounted_cumsum,
-    Episode,
 )
 from rl_baselines.reinforce import REINFORCE
 from rl_baselines.ppo import PPO
@@ -159,9 +155,8 @@ class TestVanilla(unittest.TestCase):
 
     def test_cartpole_v0(self):
         env_name = "CartPole-v0"
-        env, (policy, optimizer), _ = create_models(
-            env_name, self.hidden_sizes, self.lr
-        )
+        env = make_env(env_name, 1)
+        (policy, optimizer), _ = create_models(env, self.hidden_sizes, self.lr, self.lr)
         baseline = FutureReturnBaseline()
         policy_update = REINFORCE(policy, optimizer, baseline)
         result = solve(env_name, self.num_envs, env, policy_update, logdir)
@@ -169,30 +164,17 @@ class TestVanilla(unittest.TestCase):
 
     def test_cartpole_v1(self):
         env_name = "CartPole-v1"
-        env, (policy, optimizer), _ = create_models(
-            env_name, self.hidden_sizes, self.lr
-        )
+        env = make_env(env_name, 1)
+        (policy, optimizer), _ = create_models(env, self.hidden_sizes, self.lr, self.lr)
         baseline = FutureReturnBaseline()
         policy_update = REINFORCE(policy, optimizer, baseline)
         result = solve(env_name, self.num_envs, env, policy_update, logdir)
         self.assertEqual(result, True)
 
-    # Does not work anymore with SubprocEnv
-    # def test_inverted_pendulum_v2(self):
-    #     env_name = "InvertedPendulum-v2"
-    #     env, (policy, optimizer), _ = create_models(
-    #         env_name, self.num_envs, self.hidden_sizes, self.lr
-    #     )
-    #     baseline = FutureReturnBaseline()
-    #     policy_update = REINFORCE(policy, optimizer, baseline)
-    #     result = solve(env_name, env, policy_update, logdir)
-    #     self.assertEqual(result, True)
-
     def test_lunar_lander_v2(self):
         env_name = "LunarLander-v2"
-        env, (policy, optimizer), _ = create_models(
-            env_name, self.num_envs, self.hidden_sizes, self.lr
-        )
+        env = make_env(env_name, 1)
+        (policy, optimizer), _ = create_models(env, self.hidden_sizes, self.lr, self.lr)
         baseline = FullReturnBaseline()
         policy_update = REINFORCE(policy, optimizer, baseline)
         result = solve(env_name, env, policy_update, logdir, epochs=500)

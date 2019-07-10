@@ -1,4 +1,5 @@
-from rl_baselines.core import PolicyUpdate, logger, logdir
+from rl_baselines.core import logger, logdir
+from rl_baselines.model_updates import PolicyUpdate
 import multiprocessing
 
 
@@ -18,12 +19,8 @@ class REINFORCE(PolicyUpdate):
 
 if __name__ == "__main__":
     import argparse
-    from rl_baselines.core import (
-        solve,
-        create_models,
-        FullReturnBaseline,
-        FutureReturnBaseline,
-    )
+    from rl_baselines.core import solve, create_models, make_env
+    from rl_baselines.baselines import FullReturnBaseline, FutureReturnBaseline
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-name", "--env", type=str, default="CartPole-v0")
@@ -36,8 +33,9 @@ if __name__ == "__main__":
 
     hidden_sizes = [100]
     lr = 1e-2
-    env, (policy, optimizer), _ = create_models(
-        args.env_name, args.num_envs, hidden_sizes, lr, lr
+    env = make_env(args.env_name, args.num_envs)
+    (policy, optimizer), (value, vopt) = create_models(
+        env, hidden_sizes, args.lr, args.lr
     )
     baseline = FutureReturnBaseline()
     policy_update = REINFORCE(policy, optimizer, baseline)

@@ -1,16 +1,10 @@
 from rl_baselines.core import logger, logdir
-from rl_baselines.model_updates import PolicyUpdate
+from rl_baselines.ppo import PPO
 import multiprocessing
 import torch
 
 
-class PPO(PolicyUpdate):
-    def __init__(self, policy_iters, clip_ratio, target_kl, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.policy_iters = policy_iters
-        self.clip_ratio = clip_ratio
-        self.target_kl = target_kl
-
+class RDN(PPO):
     def loss(self, policy, episodes, obs, acts, weights, old_log_probs):
         clip_ratio = self.clip_ratio
         dist = policy(obs)
@@ -54,12 +48,20 @@ class PPO(PolicyUpdate):
 
 if __name__ == "__main__":
     import argparse
-    from rl_baselines.core import solve, create_models, make_env
-    from rl_baselines.baselines import GAEBaseline, DiscountedReturnBaseline
-    from rl_baselines.model_updates import ActorCriticUpdate, ValueUpdate
+    from rl_baselines.core import (
+        solve,
+        create_models,
+        make_env,
+        GAEBaseline,
+        ActorCriticUpdate,
+        ValueUpdate,
+        DiscountedReturnBaseline,
+    )
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env-name", "--env", type=str, default="CartPole-v0")
+    parser.add_argument(
+        "--env-name", "--env", type=str, default="PitfallNoFrameskip-v4"
+    )
     parser.add_argument("--num-envs", type=int, default=multiprocessing.cpu_count() - 1)
     parser.add_argument("--clip-ratio", "--clip", type=float, default=0.2)
     parser.add_argument("--policy-iters", type=int, default=80)
@@ -82,7 +84,7 @@ if __name__ == "__main__":
     )
 
     baseline = GAEBaseline(value, gamma=args.gamma, lambda_=args.lam)
-    policy_update = PPO(
+    policy_update = RDN(
         args.policy_iters, args.clip_ratio, args.target_kl, policy, optimizer, baseline
     )
 
