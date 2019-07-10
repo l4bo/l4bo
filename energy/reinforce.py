@@ -163,7 +163,7 @@ class Rollouts:
         )
 
 
-class A2C:
+class PPO:
     def __init__(
             self,
             config: Config,
@@ -180,6 +180,9 @@ class A2C:
         self._value_coeff = config.get('energy_reinforce_value_coeff')
         self._entropy_coeff = config.get('energy_reinforce_entropy_coeff')
         self._grad_norm_max = config.get('energy_reinforce_grad_norm_max')
+        self._epoch_count = config.get('energy_reinforce_epoch_count')
+        self._clip = config.get('energy_reinforce_clip')
+        self._batch_size = config.get('energy_reinforce_batch_size')
 
         self._envs = SubprocVecEnv(
             [make_env(
@@ -214,7 +217,7 @@ class A2C:
         }
 
         Log.out(
-            "Initializing A2C modules", {
+            "Initializing PPO modules", {
                 'paramater_count_CNN': self._modules['CNN'].parameters_count(),
                 'paramater_count_PH': self._modules['PH'].parameters_count(),
                 'paramater_count_VH': self._modules['VH'].parameters_count(),
@@ -230,7 +233,9 @@ class A2C:
             lr=self._learning_rate,
         )
 
-        Log.out('A2C initialized', {
+        self._reward_tracker = -21.0
+
+        Log.out('PPO initialized', {
             "pool_size": self._config.get('energy_reinforce_pool_size'),
             "rollout_size": self._config.get('energy_reinforce_rollout_size'),
         })
@@ -375,63 +380,77 @@ class A2C:
             advantages = \
                 (advantages - advantages.mean()) / (advantages.std() + 1e-5)
 
-        rollout_observations, \
-            rollout_actions, \
-            rollout_values, \
-            rollout_returns, \
-            rollout_masks, \
-            rollout_log_probs, \
-            rollout_advantages = self._rollouts.batch(advantages)
+        for e in range(self._epoch_count):
+            generator = self._rollouts.generator(advantages, self._batch_size)
 
-        hiddens = self._modules['CNN'](rollout_observations)
-        prd_actions = self._modules['PH'](hiddens)
-        values = self._modules['VH'](hiddens)
+            for batch in generator:
+                rollout_observations, \
+                    rollout_actions, \
+                    rollout_values, \
+                    rollout_returns, \
+                    rollout_masks, \
+                    rollout_log_probs, \
+                    rollout_advantages = batch
 
-        log_probs = prd_actions.gather(1, rollout_actions)
-        entropy = -(
-            (prd_actions * torch.exp(prd_actions)).mean()
-        )
+                hiddens = self._modules['CNN'](rollout_observations)
+                prd_actions = self._modules['PH'](hiddens)
+                values = self._modules['VH'](hiddens)
 
-        action_loss = -(rollout_advantages * log_probs).mean()
-        value_loss = F.mse_loss(values, rollout_returns)
+                log_probs = prd_actions.gather(1, rollout_actions)
+                entropy = -(prd_actions * torch.exp(prd_actions)).mean()
 
-        # Backward pass.
-        self._optimizer.zero_grad()
+                # Clipped action loss.
+                ratio = torch.exp(log_probs - rollout_log_probs)
+                action_loss = -torch.min(
+                    ratio * rollout_advantages,
+                    torch.clamp(ratio, 1.0 - self._clip, 1.0 + self._clip) *
+                    rollout_advantages,
+                ).mean()
 
-        (
-            action_loss +
-            self._value_coeff * value_loss -
-            self._entropy_coeff * entropy
-        ).backward()
+                value_loss = F.mse_loss(values, rollout_returns)
 
-        if self._grad_norm_max > 0.0:
-            torch.nn.utils.clip_grad_norm_(
-                self._modules['CNN'].parameters(),
-                self._grad_norm_max,
-            )
-            torch.nn.utils.clip_grad_norm_(
-                self._modules['PH'].parameters(),
-                self._grad_norm_max,
-            )
-            torch.nn.utils.clip_grad_norm_(
-                self._modules['VH'].parameters(),
-                self._grad_norm_max,
-            )
+                # Backward pass.
+                self._optimizer.zero_grad()
 
-        self._optimizer.step()
+                (
+                    action_loss +
+                    self._value_coeff * value_loss -
+                    self._entropy_coeff * entropy
+                ).backward()
 
-        act_loss_meter.update(action_loss.item())
-        val_loss_meter.update(value_loss.item())
-        entropy_meter.update(entropy.item())
+                if self._grad_norm_max > 0.0:
+                    torch.nn.utils.clip_grad_norm_(
+                        self._modules['CNN'].parameters(),
+                        self._grad_norm_max,
+                    )
+                    torch.nn.utils.clip_grad_norm_(
+                        self._modules['PH'].parameters(),
+                        self._grad_norm_max,
+                    )
+                    torch.nn.utils.clip_grad_norm_(
+                        self._modules['VH'].parameters(),
+                        self._grad_norm_max,
+                    )
+
+                self._optimizer.step()
+
+                act_loss_meter.update(action_loss.item())
+                val_loss_meter.update(value_loss.item())
+                entropy_meter.update(entropy.item())
 
         self._rollouts.after_update()
 
-        Log.out("ENERGY A2C RUN", {
+        if reward_meter.avg:
+            self._reward_tracker = \
+                0.99 * self._reward_tracker + 0.01 * reward_meter.avg
+
+        Log.out("ENERGY PPO RUN", {
             'epoch': epoch,
             'reward': "{:.4f}".format(reward_meter.avg or 0.0),
             'act_loss': "{:.4f}".format(act_loss_meter.avg or 0.0),
             'val_loss': "{:.4f}".format(val_loss_meter.avg or 0.0),
             'entropy': "{:.4f}".format(entropy_meter.avg or 0.0),
+            'tracker': "{:.4f}".format(self._reward_tracker),
         })
 
 
@@ -480,10 +499,10 @@ def train():
 
     # torch.manual_seed(config.get('seed'))
 
-    a2c = A2C(config)
+    ppo = PPO(config)
 
     epoch = 0
     while True:
-        a2c.run_once(epoch)
+        ppo.run_once(epoch)
         # lm.save()
         epoch += 1
