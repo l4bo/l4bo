@@ -6,5 +6,7 @@
 
 
 Testing: `python -m rl_baselines.reinforce --env-name="CartPole-v0`
+
 Checking the training results (in another shell): `tensorboard --logdir=runs/Jul08_XX-XX-XX/` (requires pytorch > 1.1 & tensorboard > 1.14 (`pip install tb-nightly`)
+
 Running an agent to see how it operates: `python -m rl_baselines.test_agent --model=run/Jul08_XX-XX-XX/checkpoint.pth --env-name=CartPole-v0`
