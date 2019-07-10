@@ -50,16 +50,12 @@ class ESMLP(nn.Module):
         self._hidden_size = config.get('energy_hidden_size')
 
         self._l1 = nn.Linear(observation_size, self._hidden_size)
-        self._l2 = nn.Linear(self._hidden_size, self._hidden_size)
-        self._l3 = nn.Linear(self._hidden_size, action_size)
+        self._l2 = nn.Linear(self._hidden_size, action_size)
 
         self._mlp = nn.Sequential(
             self._l1,
             nn.ReLU(),
             self._l2,
-            nn.ReLU(),
-            self._l3,
-            nn.ReLU(),
             nn.LogSoftmax(dim=1),
         )
 

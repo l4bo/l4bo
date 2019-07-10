@@ -78,8 +78,9 @@ class ES:
             noises = []
 
             for m in self._modules:
-                noises += [m.noise()]
-                m.apply_noise(noises[-1])
+                n = m.noise()
+                m.apply_noise(n)
+                noises += [n]
 
             pool_dones = [False] * self._pool_size
             pool_rewards = [0.0] * self._pool_size
@@ -101,10 +102,13 @@ class ES:
                 observations, rewards, dones, infos = self._envs.step(
                     np.squeeze(np.array(actions), 1),
                 )
+                obs = torch.from_numpy(
+                    observations,
+                ).float().to(self._device)
 
                 all_done = True
                 for i in range(self._pool_size):
-                    if not pool_dones[i]:
+                    if not pool_dones[i] or (not pool_dones[i] and dones[i]):
                         pool_rewards[i] += rewards[i]
                     pool_dones[i] = pool_dones[i] or dones[i]
                     all_done = all_done and pool_dones[i]
@@ -126,7 +130,7 @@ class ES:
             if self._reward_tracker is None:
                 self._reward_tracker = rewards.mean()
             self._reward_tracker = \
-                0.99 * self._reward_tracker + 0.01 * rewards.mean()
+                0.95 * self._reward_tracker + 0.05 * rewards.mean()
 
             Log.out("ENERGY ES RUN", {
                 'epoch': epoch,
