@@ -4,7 +4,6 @@ from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import torch.nn.functional as F
 import tqdm
-from torchvision import transforms
 from torch.utils.tensorboard.writer import SummaryWriter
 
 
@@ -18,8 +17,7 @@ class VAEDataset(Dataset):
         return self.data.shape[0]
 
     def __getitem__(self, i):
-        result = RESIZE(self.data[i])
-        return result
+        return self.data[i] / 255.0
 
 
 class Decoder(nn.Module):
@@ -96,23 +94,18 @@ class VAE(nn.Module):
         return recon_x, mu, logsigma
 
 
-RESIZE = transforms.Compose(
-    [transforms.ToPILImage(), transforms.Resize((64, 64)), transforms.ToTensor()]
-)
-
-
 def loss_function(recon_x, x, mu, logsigma):
     """ VAE loss function """
 
-    BCE = F.mse_loss(recon_x, x, reduction="sum")
+    MSE = F.mse_loss(recon_x, x, reduction="sum")
 
     # see Appendix B from VAE paper:
     # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
     # https://arxiv.org/abs/1312.6114
     # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
     KLD = -0.5 * torch.sum(1 + 2 * logsigma - mu.pow(2) - (2 * logsigma).exp())
-    loss = BCE + 0 * KLD
-    return loss, {"loss": loss, "BCE": BCE, "KLD": KLD}
+    loss = MSE + 0 * KLD
+    return loss, {"loss": loss, "MSE": MSE, "KLD": KLD}
 
 
 def main():
