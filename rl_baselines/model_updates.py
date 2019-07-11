@@ -43,9 +43,15 @@ class ValueUpdate(ModelUpdate):
         assert isinstance(
             self.baseline, DiscountedReturnBaseline
         ), "Value models need to learn discounted returns"
+        self.gamma = self.baseline.gamma
 
     def update(self, episodes):
-        obs, _, returns = self.batch(episodes)
+        with torch.no_grad():
+            pred_values = self.model(episodes.obs[:, -1, ...])
+        weights = episodes.discounted_returns(gamma=self.gamma, pred_values=pred_values)
+
+        # Remove last observation, it's not needed for the update anymore
+        obs, returns = episodes.obs[:, :-1, ...], weights
 
         for i in range(self.iters):
             values = self.model(obs)

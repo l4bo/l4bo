@@ -20,13 +20,16 @@ class REINFORCE(PolicyUpdate):
 if __name__ == "__main__":
     import argparse
     from rl_baselines.core import solve, create_models, make_env
-    from rl_baselines.baselines import FutureReturnBaseline
+    from rl_baselines.baselines import GAEBaseline, DiscountedReturnBaseline
+    from rl_baselines.model_updates import ActorCriticUpdate, ValueUpdate
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-name", "--env", type=str, default="CartPole-v0")
     parser.add_argument("--num-envs", type=int, default=multiprocessing.cpu_count() - 1)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=5000)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--lam", type=float, default=0.97)
     parser.add_argument("--lr", type=float, default=1e-2)
     args = parser.parse_args()
     logger.info("Using vanilla formulation of policy gradient.")
@@ -37,8 +40,12 @@ if __name__ == "__main__":
     (policy, optimizer), (value, vopt) = create_models(
         env, hidden_sizes, args.lr, args.lr
     )
-    baseline = FutureReturnBaseline()
+    baseline = GAEBaseline(value, gamma=args.gamma, lambda_=args.lam)
     policy_update = REINFORCE(policy, optimizer, baseline)
+
+    vbaseline = DiscountedReturnBaseline(gamma=args.gamma, normalize=False)
+    value_update = ValueUpdate(value, vopt, vbaseline, iters=1)
+    update = ActorCriticUpdate(policy_update, value_update)
     solve(
         args.env_name,
         env,

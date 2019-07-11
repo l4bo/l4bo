@@ -1,12 +1,13 @@
 import argparse
 import torch
 import gym
+from rl_baselines.core import make_env
 
 
 def test_agent(env_name, policy_update_filename):
     policy_update = torch.load(policy_update_filename)
     logger.debug(f"Loaded : {policy_update}")
-    env = gym.make(env_name)
+    env = make_env(env_name, 1)
     obs = env.reset()
     done = False
     policy = policy_update.policy

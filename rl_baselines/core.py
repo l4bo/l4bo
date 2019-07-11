@@ -71,15 +71,37 @@ class Episodes:
             )
         return advantages
 
-    def discounted_returns(self, gamma):
+    def discounted_returns(self, gamma, pred_values):
         rets = self.get_buffer("rets")
-        curr_rets = 0
+        curr_rets = pred_values
         for t in range(self.num_steps - 1, -1, -1):  # nsteps-1 ... 0
             nextdone = self.dones[:, t + 1] if t + 1 < self.num_steps else 0
             nextnotdone = 1 - nextdone
             curr_rets = self.rews[:, t] + gamma * curr_rets * nextnotdone
             rets[:, t] = curr_rets
         return rets
+
+    def discounted_returns_discard(self, gamma):
+        rets = self.get_buffer("rets")
+        curr_rets = self.rews[:, self.num_steps - 1]
+        # Starts are tracking if we are looking at a complete episode.
+        # Basically we want to discard
+        masks = torch.zeros(*rets.shape).long()
+        for t in range(self.num_steps - 1, -1, -1):  # nsteps-1 ... 0
+            nextdone = (
+                self.dones[:, t + 1]
+                if t + 1 < self.num_steps
+                else torch.zeros(*curr_rets.shape)
+            )
+            nextnotdone = 1 - nextdone
+            masks[t] = (
+                (masks[t + 1] | nextdone.long())
+                if t + 1 < self.num_steps
+                else nextdone.long()
+            )
+            curr_rets = self.rews[:, t] + gamma * curr_rets * nextnotdone
+            rets[:, t] = curr_rets
+        return rets, masks
 
     def stats(self):
         stats = torch.zeros((self.num_env, 3))
@@ -97,25 +119,26 @@ class Episodes:
             nextnotdone = 1 - nextdone
             stats[:, 0] = self.rews[:, t] + nextnotdone * stats[:, 0]
             stats[:, 1] = 1 + nextnotdone * stats[:, 1]
-        for i in range(self.num_env):
-            if stats[i, 2]:
-                all_returns.append(stats[i, 0])
-                all_lengths.append(stats[i, 1])
+        # for i in range(self.num_env):
+        #     if stats[i, 2]:
+        #         all_returns.append(stats[i, 0])
+        #         all_lengths.append(stats[i, 1])
         return np.array(all_returns), np.array(all_lengths)
 
 
-def gather_episodes(env, batch_size, policy):
-    episodes = []
-
-    num_envs = env.num_envs
-    episodes = Episodes(
-        num_envs, batch_size, env.observation_space.shape, env.action_space.shape
-    )
+def gather_episodes(episodes, env, num_steps, policy, epoch):
 
     # reset episode-specific variables
+
     obs = env.reset()  # first obs comes from starting distribution
+    # if epoch == 0:
+    #     obs = env.reset()  # first obs comes from starting distribution
+    # else:
+    #     obs, _, _, _ = env.step_wait()
+
     obs = torch.from_numpy(obs).float()
-    for step in range(batch_size):
+
+    for step in range(num_steps):
         episodes.obs[:, step] = obs
         # act in the environment
         dist = policy(obs)
@@ -128,19 +151,23 @@ def gather_episodes(env, batch_size, policy):
         episodes.dones[:, step] = torch.from_numpy(dones)
 
     # Push last observation needed for advantages
-    episodes.obs[:, batch_size] = obs
+    episodes.obs[:, num_steps] = obs
+
+    # Send a last action to environments so we can continue the episode
+    # dist = policy(obs)
+    # acts = dist.sample()
+    # env.step_async(acts.cpu().numpy())
 
     return episodes
 
 
-def train_one_epoch(env, batch_size, render, policy_update, device):
+def train_one_epoch(env, num_steps, epoch, episodes, policy_update, device):
 
     policy = policy_update.policy
 
     # collect experience by acting in the environment with current policy
     # start = datetime.datetime.now()
-    num_steps = batch_size // env.num_envs
-    episodes = gather_episodes(env, num_steps, policy)
+    episodes = gather_episodes(episodes, env, num_steps, policy, epoch)
     # end_rollout = datetime.datetime.now()
 
     losses = policy_update.update(episodes)
@@ -235,9 +262,13 @@ def solve(
 
     max_ret = -1e9
 
+    num_steps = batch_size // env.num_envs
+    episodes = Episodes(
+        env.num_envs, num_steps, env.observation_space.shape, env.action_space.shape
+    )
     for epoch in range(epochs):
         losses, episodes = train_one_epoch(
-            env, batch_size, render, policy_update=policy_update, device=device
+            env, num_steps, epoch, episodes, policy_update=policy_update, device=device
         )
         rets, lens = episodes.stats()
         rets = rets.mean()

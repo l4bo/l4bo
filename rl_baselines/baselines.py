@@ -20,18 +20,19 @@ class Baseline:
         return f"{self.__class__.__name__}(normalize={self.normalize})"
 
 
-class FutureReturnBaseline(Baseline):
-    def _get(self, episodes):
-        return episodes.discounted_returns(gamma=1)
-
-
 class DiscountedReturnBaseline(Baseline):
     def __init__(self, gamma, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.gamma = gamma
 
     def _get(self, episodes):
-        return episodes.discounted_returns(self.gamma)
+        weights, masks = episodes.discounted_returns_discard(self.gamma)
+        return weights
+
+
+class FutureReturnBaseline(DiscountedReturnBaseline):
+    def __init__(self, *args, **kwargs):
+        super().__init__(gamma=1, *args, **kwargs)
 
 
 class GAEBaseline(Baseline):
