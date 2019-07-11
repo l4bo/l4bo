@@ -70,6 +70,7 @@ def main():
 
     out = observations.reshape(-1, H, W, T)
     out = out.permute(0, 3, 1, 2)
+    out = out / 255.0
     torch.save(out, "frames.pty")
 
 

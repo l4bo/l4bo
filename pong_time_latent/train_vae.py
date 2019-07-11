@@ -12,12 +12,14 @@ class VAEDataset(Dataset):
         if not os.path.exists(filename):
             raise Exception("Try to create some frames first")
         self.data = torch.load(filename)
+        assert self.data.min() > 0
+        assert self.data.max() <= 1
 
     def __len__(self):
         return self.data.shape[0]
 
     def __getitem__(self, i):
-        return self.data[i] / 255.0
+        return self.data[i]
 
 
 class Decoder(nn.Module):
@@ -41,7 +43,7 @@ class Decoder(nn.Module):
         x = F.relu(self.deconv1(x))
         x = F.relu(self.deconv2(x))
         x = F.relu(self.deconv3(x))
-        reconstruction = torch.sigmoid(self.deconv4(x))
+        reconstruction = self.deconv4(x)
         return reconstruction
 
 
@@ -86,9 +88,9 @@ class VAE(nn.Module):
 
     def forward(self, x):  # pylint: disable=arguments-differ
         mu, logsigma = self.encoder(x)
-        sigma = logsigma.exp()
+        sigma = (0.5 * logsigma).exp()
         eps = torch.randn_like(sigma)
-        z = eps.mul(sigma).add_(mu)
+        z = mu + eps * sigma
 
         recon_x = self.decoder(z)
         return recon_x, mu, logsigma
@@ -97,22 +99,23 @@ class VAE(nn.Module):
 def loss_function(recon_x, x, mu, logsigma):
     """ VAE loss function """
 
-    MSE = F.mse_loss(recon_x, x, reduction="sum")
+    MSE = F.mse_loss(recon_x, x)
+    BCE = F.binary_cross_entropy_with_logits(recon_x, x)
 
     # see Appendix B from VAE paper:
     # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
     # https://arxiv.org/abs/1312.6114
     # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
     KLD = -0.5 * torch.sum(1 + 2 * logsigma - mu.pow(2) - (2 * logsigma).exp())
-    loss = MSE + 0 * KLD
-    return loss, {"loss": loss, "MSE": MSE, "KLD": KLD}
+    loss = BCE
+    return loss, {"loss": loss, "MSE": MSE, "KLD": KLD, "BCE": BCE}
 
 
 def main():
 
     batch_size = 32
     epochs = 100
-    lr = 1e-4
+    lr = 1e-3
     latent_size = 1024
     time_channels = 4
     num_workers = 4
@@ -120,39 +123,54 @@ def main():
 
     filename = "frames.pty"
     dataset = VAEDataset(filename)
-    dataloader = DataLoader(
-        dataset, shuffle=True, batch_size=batch_size, num_workers=num_workers
+    N = len(dataset)
+    T = int(0.9 * N)
+    train_dataset, test_dataset = torch.utils.data.random_split(dataset, [T, N - T])
+    train_dataloader = DataLoader(
+        train_dataset, shuffle=True, batch_size=batch_size, num_workers=num_workers
+    )
+    test_dataloader = DataLoader(
+        test_dataset, shuffle=True, batch_size=batch_size, num_workers=num_workers
     )
     vae_model = VAE(time_channels, latent_size)
     vae_model.to(device)
 
-    scheduler = torch.optim.lr_scheduler.CyclicLR(
-        torch.optim.SGD(vae_model.parameters(), lr=lr, momentum=0.9),
-        base_lr=0,
-        max_lr=lr,
-    )
+    optimizer = torch.optim.Adam(vae_model.parameters(), lr=lr)
+    # scheduler = torch.optim.lr_scheduler.CyclicLR(
+    #     torch.optim.SGD(vae_model.parameters(), lr=lr, momentum=0.9),
+    #     base_lr=0,
+    #     max_lr=lr,
+    # )
 
     writer = SummaryWriter()
 
     step = 0
     best_loss = 1e9
     for epoch in tqdm.tqdm(range(epochs)):
-        avg_loss = 0
-        for item in tqdm.tqdm(dataloader):
+        for item in tqdm.tqdm(train_dataloader):
             item = item.to(device)
             reconstructed, mu, logsigma = vae_model(item)
             loss, losses = loss_function(reconstructed, item, mu, logsigma)
 
             for loss_name, l in losses.items():
-                writer.add_scalar(f"VAE/{loss_name}", l, global_step=step)
+                writer.add_scalar(f"train/{loss_name}", l, global_step=step)
 
-            scheduler.optimizer.zero_grad()
+            optimizer.zero_grad()
             loss.backward()
-            scheduler.optimizer.step()
-            scheduler.step()
+            optimizer.step()
+            # scheduler.step()
             step += 1
-            avg_loss += loss.item()
-        avg_loss /= len(dataloader)
+
+        avg_loss = 0
+        for item in tqdm.tqdm(test_dataloader):
+            item = item.to(device)
+            with torch.no_grad():
+                reconstructed, mu, logsigma = vae_model(item)
+                loss, losses = loss_function(reconstructed, item, mu, logsigma)
+                for loss_name, l in losses.items():
+                    writer.add_scalar(f"test/{loss_name}", l, global_step=step)
+                avg_loss += loss.item()
+        avg_loss /= len(test_dataloader)
 
         if avg_loss < best_loss:
             best_loss = avg_loss
