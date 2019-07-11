@@ -288,7 +288,8 @@ class PPO:
                 log_probs = prd_actions.gather(1, actions)
 
                 for i, r in enumerate(rewards):
-                    self._episode_rewards[i] += r / 500.0
+                    self._episode_rewards[i] += r / \
+                        self._config.get("energy_reward_scaling")
                     if dones[i]:
                         reward_meter.update(self._episode_rewards[i])
                         self._episode_rewards[i] = 0.0
@@ -300,7 +301,10 @@ class PPO:
                     log_probs.detach(),
                     values.detach(),
                     torch.tensor(
-                        [r/500.0 for r in rewards], dtype=torch.float,
+                        [
+                            r / self._config.get("energy_reward_scaling")
+                            for r in rewards
+                        ], dtype=torch.float,
                     ).unsqueeze(1).to(self._device),
                     torch.tensor(
                         [[0.0] if d else [1.0] for d in dones],

@@ -4,6 +4,7 @@
   "seed": 42,
 
   "energy_gym_env": "LunarLander-v2",
+  "energy_reward_scaling": 200,
 
   "energy_hidden_size": 128,
 
