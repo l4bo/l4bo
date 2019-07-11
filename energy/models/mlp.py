@@ -49,8 +49,8 @@ class ESMLP(nn.Module):
         self._device = torch.device(config.get('device'))
         self._hidden_size = config.get('energy_hidden_size')
 
-        self._l1 = nn.Linear(observation_size, self._hidden_size)
-        self._l2 = nn.Linear(self._hidden_size, action_size)
+        self._l1 = nn.Linear(observation_size, self._hidden_size, bias=False)
+        self._l2 = nn.Linear(self._hidden_size, action_size, bias=False)
 
         self._mlp = nn.Sequential(
             self._l1,
@@ -100,6 +100,6 @@ class ESMLP(nn.Module):
             self,
             observations,
     ):
-        hiddens = self._mlp(observations)
+        out = self._mlp(observations)
 
-        return hiddens
+        return out

@@ -66,7 +66,7 @@ class ES:
         })
 
         for m in self._modules:
-            m.eval()
+            m.train()
 
         self._reward_tracker = None
 
@@ -75,8 +75,13 @@ class ES:
             epoch: int,
     ):
         with torch.no_grad():
-            noises = []
+            observations = self._envs.reset()
 
+            obs = torch.from_numpy(
+                observations,
+            ).float().to(self._device)
+
+            noises = []
             for m in self._modules:
                 n = m.noise()
                 m.apply_noise(n)
@@ -84,12 +89,6 @@ class ES:
 
             pool_dones = [False] * self._pool_size
             pool_rewards = [0.0] * self._pool_size
-
-            observations = self._envs.reset()
-
-            obs = torch.from_numpy(
-                observations,
-            ).float().to(self._device)
 
             all_done = False
             while(not all_done):
