@@ -2,6 +2,7 @@ import argparse
 import torch
 import gym
 from rl_baselines.core import make_env
+import numpy as np
 
 
 def test_agent(env_name, policy_update_filename):
@@ -9,11 +10,11 @@ def test_agent(env_name, policy_update_filename):
     logger.debug(f"Loaded : {policy_update}")
     env = make_env(env_name, 1)
     obs = env.reset()
-    done = False
+    done = np.array([False])
     policy = policy_update.policy
     total_reward = 0
     steps = 0
-    while not done:
+    while not done.all():
         env.render()
         dist = policy(torch.from_numpy(obs).float())
         act = dist.sample()

@@ -8,6 +8,7 @@ from rl_baselines.baselines import (
     DiscountedReturnBaseline,
     GAEBaseline,
 )
+from rl_baselines.model_updates import ActorCriticUpdate, ValueUpdate
 from rl_baselines.reinforce import REINFORCE
 from rl_baselines.ppo import PPO
 
@@ -26,7 +27,7 @@ def discounted_cumsum(elements, gamma):
 
 class TestBaselines(unittest.TestCase):
     def setUp(self):
-        episodes = Episodes(num_env=2, num_steps=4, obs_shape=(2,))
+        episodes = Episodes(num_env=2, num_steps=4, obs_shape=(2,), act_shape=())
         # There is one last observation for advantage estimation.
         episodes.obs[0] = torch.Tensor([[1, -2], [1, -2], [1, -2], [1, -2], [1, -2]])
         episodes.rews[0] = torch.Tensor([1, 0, 1, 0])
@@ -42,47 +43,11 @@ class TestBaselines(unittest.TestCase):
 
         self.episodes = episodes
 
-    def test_future_return_baseline(self):
-        baseline = FutureReturnBaseline(normalize=False)
-        weights = baseline(self.episodes)
-
-        target = torch.Tensor([[2.0, 1.0, 1.0, 0], [1.0, 3.0, 2.0, 1.0]])
-        self.assertEqual(weights.tolist(), target.tolist())
-
-        baseline = FutureReturnBaseline(normalize=True)
-        weights = baseline(self.episodes)
-
-        target2 = (target - target.mean()) / (target.std() + 1e-5)
-        self.assertEqual(weights.tolist(), target2.tolist())
-
-    def test_discounted_return_baseline(self):
-        gamma = 0.99
-        baseline = DiscountedReturnBaseline(gamma=gamma, normalize=False)
-        weights = baseline(self.episodes)
-
-        target = torch.Tensor(
-            [
-                [1.0 + 1.0 * gamma ** 2, 0.0 + 1.0 * gamma, 1.0, 0.0],
-                [1.0, 1.0 + 1.0 * gamma + 1 * gamma ** 2, 1.0 + 1.0 * gamma, 1.0],
-            ]
-        )
-        self.assertEqual(weights.tolist(), target.tolist())
-
-        baseline = DiscountedReturnBaseline(gamma=gamma, normalize=True)
-        weights = baseline(self.episodes)
-
-        target2 = (target - target.mean()) / (target.std() + 1e-5)
-        self.assertEqual(weights.tolist(), target2.tolist())
-
     def test_gae_return_baseline(self):
         gamma = 0.99
         lambda_ = 0.95
         values = torch.arange(1, 11).reshape((2, 5)).float()
-        value_model = lambda x: values
-        baseline = GAEBaseline(
-            value_model=value_model, gamma=gamma, lambda_=lambda_, normalize=False
-        )
-        weights = baseline(self.episodes)
+        weights = self.episodes.gae_advantages(values, gamma, lambda_)
 
         rewards = self.episodes.rews
         deltas = torch.Tensor(
@@ -111,44 +76,42 @@ class TestBaselines(unittest.TestCase):
         )
         self.assertEqual(weights.tolist(), target.tolist())
 
-        baseline = GAEBaseline(
-            value_model=value_model, gamma=gamma, lambda_=lambda_, normalize=True
-        )
-        weights = baseline(self.episodes)
-
-        target2 = (target - target.mean()) / (target.std() + 1e-5)
-        self.assertEqual(weights.tolist(), target2.tolist())
-
 
 class TestVanilla(unittest.TestCase):
-    hidden_sizes = [100]
-    num_envs = multiprocessing.cpu_count() - 1
-    lr = 1e-2
+    num_envs = 1
+
+    def get_update_model(self, env):
+        hidden_sizes = [100]
+        lr = 1e-2
+        gamma = 0.99
+        lam = 0.97
+
+        (policy, optimizer), (value, vopt) = create_models(env, hidden_sizes, lr, lr)
+        baseline = GAEBaseline(value, gamma=gamma, lambda_=lam)
+        policy_update = REINFORCE(policy, optimizer, baseline)
+
+        vbaseline = DiscountedReturnBaseline(gamma=gamma, normalize=False)
+        value_update = ValueUpdate(value, vopt, vbaseline, iters=1)
+        return ActorCriticUpdate(policy_update, value_update)
 
     def test_cartpole_v0(self):
         env_name = "CartPole-v0"
         env = make_env(env_name, 1)
-        (policy, optimizer), _ = create_models(env, self.hidden_sizes, self.lr, self.lr)
-        baseline = FutureReturnBaseline()
-        policy_update = REINFORCE(policy, optimizer, baseline)
-        result = solve(env_name, self.num_envs, env, policy_update, logdir)
+        policy_update = self.get_update_model(env)
+        result = solve(env_name, env, policy_update, logdir)
         self.assertEqual(result, True)
 
     def test_cartpole_v1(self):
         env_name = "CartPole-v1"
         env = make_env(env_name, 1)
-        (policy, optimizer), _ = create_models(env, self.hidden_sizes, self.lr, self.lr)
-        baseline = FutureReturnBaseline()
-        policy_update = REINFORCE(policy, optimizer, baseline)
-        result = solve(env_name, self.num_envs, env, policy_update, logdir)
+        policy_update = self.get_update_model(env)
+        result = solve(env_name, env, policy_update, logdir)
         self.assertEqual(result, True)
 
     def test_lunar_lander_v2(self):
         env_name = "LunarLander-v2"
         env = make_env(env_name, 1)
-        (policy, optimizer), _ = create_models(env, self.hidden_sizes, self.lr, self.lr)
-        baseline = FutureReturnBaseline()
-        policy_update = REINFORCE(policy, optimizer, baseline)
+        policy_update = self.get_update_model(env)
         result = solve(env_name, env, policy_update, logdir, epochs=500)
         self.assertEqual(result, True)
 
