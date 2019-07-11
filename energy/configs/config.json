@@ -5,7 +5,7 @@
 
   "energy_gym_env": "CartPole-v1",
 
-  "energy_hidden_size": 64,
+  "energy_hidden_size": 128,
 
   "energy_reinforce_rollout_size": 32,
   "energy_reinforce_pool_size": 16,
@@ -22,7 +22,7 @@
   "energy_reinforce_grad_norm_max": 0.0,
 
   "energy_es_pool_size": 256,
-  "energy_es_alpha": 0.1,
+  "energy_es_alpha": 0.4,
   "energy_es_sigma": 0.1,
 
   "tensorboard_log_dir": null
