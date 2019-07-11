@@ -3,7 +3,7 @@
 
   "seed": 42,
 
-  "energy_gym_env": "CartPole-v1",
+  "energy_gym_env": "LunarLander-v2",
 
   "energy_hidden_size": 128,
 

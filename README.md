@@ -3,6 +3,9 @@
 ### Projects
 
 - **energy_rl**: *Study of back-propagation in energy constrained environments*
+  - PPO: `energy_reinforce_train energy/configs/config.json --device cpu`
+  - ES: `energy_es_train energy/configs/config.json --device cpu`
+
 
 
 Testing: `python -m rl_baselines.reinforce --env-name="CartPole-v0`
