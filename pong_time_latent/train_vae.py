@@ -3,8 +3,11 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 import tqdm
 from torch.utils.tensorboard.writer import SummaryWriter
+from random import randrange
+import torchvision
 
 
 class VAEDataset(Dataset):
@@ -12,7 +15,8 @@ class VAEDataset(Dataset):
         if not os.path.exists(filename):
             raise Exception("Try to create some frames first")
         self.data = torch.load(filename)
-        assert self.data.min() > 0
+        self.data.requires_grad = False
+        assert self.data.min() >= 0
         assert self.data.max() <= 1
 
     def __len__(self):
@@ -43,7 +47,7 @@ class Decoder(nn.Module):
         x = F.relu(self.deconv1(x))
         x = F.relu(self.deconv2(x))
         x = F.relu(self.deconv3(x))
-        reconstruction = self.deconv4(x)
+        reconstruction = torch.sigmoid(self.deconv4(x))
         return reconstruction
 
 
@@ -100,24 +104,24 @@ def loss_function(recon_x, x, mu, logsigma):
     """ VAE loss function """
 
     MSE = F.mse_loss(recon_x, x)
-    BCE = F.binary_cross_entropy_with_logits(recon_x, x)
+    BCE = F.binary_cross_entropy(recon_x, x)
 
     # see Appendix B from VAE paper:
     # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
     # https://arxiv.org/abs/1312.6114
     # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
     KLD = -0.5 * torch.sum(1 + 2 * logsigma - mu.pow(2) - (2 * logsigma).exp())
-    loss = BCE
+    loss = MSE + 0 * KLD
     return loss, {"loss": loss, "MSE": MSE, "KLD": KLD, "BCE": BCE}
 
 
 def main():
 
     batch_size = 32
-    epochs = 100
+    epochs = 1000
     lr = 1e-3
     latent_size = 1024
-    time_channels = 4
+    time_channels = 3
     num_workers = 4
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -134,13 +138,11 @@ def main():
     )
     vae_model = VAE(time_channels, latent_size)
     vae_model.to(device)
+    vae_model.train()
 
     optimizer = torch.optim.Adam(vae_model.parameters(), lr=lr)
-    # scheduler = torch.optim.lr_scheduler.CyclicLR(
-    #     torch.optim.SGD(vae_model.parameters(), lr=lr, momentum=0.9),
-    #     base_lr=0,
-    #     max_lr=lr,
-    # )
+    # optimizer = torch.optim.SGD(vae_model.parameters(), lr=lr, momentum=0.9)
+    # scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=0, max_lr=lr)
 
     writer = SummaryWriter()
 
@@ -176,6 +178,27 @@ def main():
             best_loss = avg_loss
             print(f"Saving best model {avg_loss}")
             torch.save(vae_model, "vae.pth")
+
+        grid = add_reconstruction(dataset, vae_model)
+        writer.add_image("reconstruction", grid, global_step=step)
+
+
+def add_reconstruction(dataset, vae_model, B=5):
+    dataloader = DataLoader(dataset, batch_size=B, shuffle=True)
+    images = next(iter(dataloader))
+    reconstructed, _, _ = vae_model(images.cuda())
+    reconstructed = reconstructed.cpu().detach()
+
+    errors = (reconstructed - images) ** 2
+
+    assert reconstructed.shape == images.shape
+    errors = (errors - errors.min()) / (errors.max() - errors.min())
+    errors = 1 - errors
+
+    all_images = torch.cat((images, reconstructed, errors), dim=0)
+    grid = torchvision.utils.make_grid(all_images, nrow=B)
+
+    return grid
 
 
 if __name__ == "__main__":

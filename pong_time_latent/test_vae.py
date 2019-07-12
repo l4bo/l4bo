@@ -15,7 +15,7 @@ def show(dataset, model, M):
         plt.subplot(2, 4, 4 + N + 1)
         plt.imshow(reconstructed[0, N].cpu().detach(), cmap="gray")
 
-    plt.show()
+    plt.savefig("vae.png")
 
 
 def main():
