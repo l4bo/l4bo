@@ -20,7 +20,7 @@ def make_env(env_id, seed, rank):
     def _thunk():
         env = gym.make(env_id)
         env.seed(seed + rank)
-        if env_id == "PongNoFrameskip-v":
+        if env_id == "PongNoFrameskip-v4":
             env = make_atari(env_id)
             env = wrap_deepmind(env, frame_stack=True)
         return env
@@ -83,6 +83,7 @@ class ES:
 
         Log.out('ES initialized', {
             "pool_size": self._config.get('energy_es_pool_size'),
+            "parameters": self._modules[0].parameters_count(),
         })
 
         for m in self._modules:

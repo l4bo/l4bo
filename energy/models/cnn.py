@@ -71,14 +71,14 @@ class ESCNN(nn.Module):
             nn.ReLU(),
             nn.Conv2d(64, 32, 3, stride=1, bias=False),
             nn.ReLU(),
-            nn.Conv2d(32, 32, 4, stride=2, bias=False),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2, padding=1, bias=False),
-            nn.ReLU(),
+            # nn.Conv2d(32, 32, 4, stride=2, bias=False),
+            # nn.ReLU(),
+            # nn.Conv2d(32, 64, 4, stride=2, padding=1, bias=False),
+            # nn.ReLU(),
         )
 
         self._tail = nn.Sequential(
-            nn.Linear(64, self._hidden_size, bias=False),
+            nn.Linear(32*7*7, self._hidden_size, bias=False),
             nn.ReLU(),
             nn.Linear(self._hidden_size, action_size, bias=False),
             nn.LogSoftmax(dim=1),
@@ -126,6 +126,6 @@ class ESCNN(nn.Module):
             observations,
     ):
         hiddens = self._convs(observations)
-        outs = self._tail(hiddens.squeeze().unsqueeze(0))
+        outs = self._tail(hiddens.view(observations.size(0), -1))
 
         return outs
