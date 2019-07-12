@@ -21,13 +21,12 @@ class WarpFrame(gym.ObservationWrapper):
         self.width = 64
         self.height = 64
         self.observation_space = gym.spaces.Box(
-            low=0, high=255, shape=(self.height, self.width, 3), dtype=np.uint8
+            low=0, high=255, shape=(self.height, self.width, 1), dtype=np.uint8
         )
 
     def observation(self, frame):
-        # frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         frame = cv2.resize(frame, (self.width, self.height))
-        return frame
         return frame[:, :, None]
 
 
@@ -47,11 +46,10 @@ def wrap_deepmind(env, clip_rewards=True, frame_stack=False, scale=False):
 
 def main():
     num_envs = multiprocessing.cpu_count() - 1
-    env_name = "CarRacing-v0"
+    env_name = "PongNoFrameskip-v4"
     env = SubprocVecEnv(
         [
-            # lambda: wrap_deepmind(make_atari(env_name), frame_stack=True)
-            lambda: wrap_deepmind(gym.make(env_name))
+            lambda: wrap_deepmind(gym.make(env_name), frame_stack=True)
             for i in range(num_envs)
         ]
     )
@@ -71,9 +69,6 @@ def main():
     out = observations.reshape(-1, H, W, T)
     out = out.permute(0, 3, 1, 2)
     out = out / 255.0
-    import ipdb
-
-    ipdb.set_trace()
     torch.save(out, "frames.pty")
 
 

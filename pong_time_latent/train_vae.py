@@ -121,7 +121,7 @@ def main():
     epochs = 1000
     lr = 1e-3
     latent_size = 1024
-    time_channels = 3
+    time_channels = 4
     num_workers = 4
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -179,11 +179,11 @@ def main():
             print(f"Saving best model {avg_loss}")
             torch.save(vae_model, "vae.pth")
 
-        grid = add_reconstruction(dataset, vae_model)
+        grid = add_reconstruction(dataset, vae_model, time_channels)
         writer.add_image("reconstruction", grid, global_step=step)
 
 
-def add_reconstruction(dataset, vae_model, B=5):
+def add_reconstruction(dataset, vae_model, T, B=5):
     dataloader = DataLoader(dataset, batch_size=B, shuffle=True)
     images = next(iter(dataloader))
     reconstructed, _, _ = vae_model(images.cuda())
@@ -195,8 +195,9 @@ def add_reconstruction(dataset, vae_model, B=5):
     errors = (errors - errors.min()) / (errors.max() - errors.min())
     errors = 1 - errors
 
-    all_images = torch.cat((images, reconstructed, errors), dim=0)
-    grid = torchvision.utils.make_grid(all_images, nrow=B)
+    all_images = torch.cat((images, reconstructed, errors), dim=1)
+    all_images = all_images.view(-1, 64, 64).unsqueeze(1)
+    grid = torchvision.utils.make_grid(all_images, nrow=T)
 
     return grid
 
