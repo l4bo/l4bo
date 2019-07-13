@@ -60,20 +60,24 @@ class Encoder(nn.Module):
         # self.img_size = img_size
         self.img_channels = img_channels
 
-        self.conv1 = nn.Conv2d(img_channels, 32, 4, stride=2)
-        self.conv2 = nn.Conv2d(32, 64, 4, stride=2)
-        self.conv3 = nn.Conv2d(64, 128, 4, stride=2)
-        self.conv4 = nn.Conv2d(128, 256, 4, stride=2)
+        self.conv1 = nn.Conv2d(img_channels, 32, 5, stride=2, padding=2)
+        self.conv1_bn = nn.BatchNorm2d(32)
+        self.conv2 = nn.Conv2d(32, 64, 5, stride=2, padding=2)
+        self.conv2_bn = nn.BatchNorm2d(64)
+        self.conv3 = nn.Conv2d(64, 128, 5, stride=2, padding=2)
+        self.conv3_bn = nn.BatchNorm2d(128)
+        self.conv4 = nn.Conv2d(128, 256, 5, stride=2, padding=2)
+        self.conv4_bn = nn.BatchNorm2d(256)
 
-        N = 1024
+        N = 4096
         self.fc_mu = nn.Linear(N, latent_size)
         self.fc_logsigma = nn.Linear(N, latent_size)
 
     def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = F.relu(self.conv4(x))
+        x = F.relu(self.conv1_bn(self.conv1(x)))
+        x = F.relu(self.conv2_bn(self.conv2(x)))
+        x = F.relu(self.conv3_bn(self.conv3(x)))
+        x = F.relu(self.conv4_bn(self.conv4(x)))
         x = x.view(x.size(0), -1)
 
         mu = self.fc_mu(x)
@@ -111,14 +115,14 @@ def loss_function(recon_x, x, mu, logsigma):
     # https://arxiv.org/abs/1312.6114
     # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
     KLD = -0.5 * torch.sum(1 + 2 * logsigma - mu.pow(2) - (2 * logsigma).exp())
-    loss = MSE + 0 * KLD
+    loss = MSE + 1e-8 * KLD
     return loss, {"loss": loss, "MSE": MSE, "KLD": KLD, "BCE": BCE}
 
 
 def main():
 
     batch_size = 32
-    epochs = 1000
+    epochs = 10000
     lr = 1e-3
     latent_size = 1024
     time_channels = 4
