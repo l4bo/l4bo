@@ -44,6 +44,20 @@ if not logger.handlers:
     logdir = set_logger(logger)
 
 
+def gae_advantages(advantages, values, dones, rews, gamma, lambda_):
+    lastgaelam = 0
+    num_steps = advantages.shape[1]
+    for t in range(num_steps - 1, -1, -1):  # nsteps-1 ... 0
+        nextdone = dones[:, t + 1] if t + 1 < num_steps else 0
+        nextvals = values[:, t + 1]
+        nextnotdone = 1 - nextdone
+        delta = rews[:, t] + gamma * nextvals * nextnotdone - values[:, t]
+        advantages[:, t] = lastgaelam = (
+            delta + gamma * lambda_ * nextnotdone * lastgaelam
+        )
+    return advantages
+
+
 class Episodes:
     def __init__(self, num_env, num_steps, obs_shape, act_shape):
         self.num_steps = num_steps
@@ -60,16 +74,7 @@ class Episodes:
 
     def gae_advantages(self, values, gamma, lambda_):
         advantages = self.get_buffer("advs")
-        lastgaelam = 0
-        for t in range(self.num_steps - 1, -1, -1):  # nsteps-1 ... 0
-            nextdone = self.dones[:, t + 1] if t + 1 < self.num_steps else 0
-            nextvals = values[:, t + 1]
-            nextnotdone = 1 - nextdone
-            delta = self.rews[:, t] + gamma * nextvals * nextnotdone - values[:, t]
-            advantages[:, t] = lastgaelam = (
-                delta + gamma * lambda_ * nextnotdone * lastgaelam
-            )
-        return advantages
+        return gae_advantages(advantages, values, self.dones, self.rews, gamma, lambda_)
 
     def discounted_returns(self, gamma, pred_values):
         rets = self.get_buffer("rets")
@@ -205,7 +210,7 @@ def make_env(env_name, num_envs):
     return env
 
 
-def create_models(env, hidden_sizes, pi_lr, vf_lr):
+def default_policy_model(env, hidden_sizes):
     # make environment, check spaces, get obs / act dims
 
     if isinstance(env.action_space, Discrete):
@@ -220,11 +225,16 @@ def create_models(env, hidden_sizes, pi_lr, vf_lr):
         policy = DiscretePolicy(model)
     elif isinstance(env.action_space, Box):
         policy = ContinuousPolicy(model, env.action_space.shape)
-
     else:
         raise NotImplementedError(
             "We don't handle action spaces different from box/discrete yet."
         )
+    return policy
+
+
+def create_models(env, hidden_sizes, pi_lr, vf_lr):
+    policy = default_policy_model(env, hidden_sizes)
+
     poptimizer = torch.optim.Adam(policy.parameters(), lr=pi_lr)
 
     value = ValueModel(default_model(env, hidden_sizes, 1))

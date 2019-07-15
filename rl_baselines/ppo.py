@@ -4,30 +4,28 @@ import multiprocessing
 import torch
 
 
+def ppo_loss(policy, obs, acts, weights, old_log_probs, clip_ratio):
+    dist = policy(obs)
+    log_probs = dist.log_prob(acts)
+
+    diff = log_probs - old_log_probs
+    ratio = (diff).exp()
+    approx_kl = (-diff).mean().item()
+    clipped = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
+
+    clipfrac = ((ratio > (1 + clip_ratio)) | (ratio < (1 - clip_ratio))).float().mean()
+
+    loss = -(torch.min(ratio * weights, clipped * weights)).mean()
+    entropy = dist.entropy().mean()
+    return loss, approx_kl, clipfrac, entropy
+
+
 class PPO(PolicyUpdate):
     def __init__(self, policy_iters, clip_ratio, target_kl, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.policy_iters = policy_iters
         self.clip_ratio = clip_ratio
         self.target_kl = target_kl
-
-    def loss(self, policy, episodes, obs, acts, weights, old_log_probs):
-        clip_ratio = self.clip_ratio
-        dist = policy(obs)
-        log_probs = dist.log_prob(acts)
-
-        diff = log_probs - old_log_probs
-        ratio = (diff).exp()
-        approx_kl = (-diff).mean().item()
-        clipped = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio)
-
-        clipfrac = (
-            ((ratio > (1 + clip_ratio)) | (ratio < (1 - clip_ratio))).float().mean()
-        )
-
-        loss = -(torch.min(ratio * weights, clipped * weights)).mean()
-        entropy = dist.entropy().mean()
-        return loss, approx_kl, clipfrac, entropy
 
     def update(self, episodes):
         obs, acts, weights = self.batch(episodes)
@@ -38,8 +36,8 @@ class PPO(PolicyUpdate):
         # logger.debug("\t".join(["pi_loss", "kl", "clipfrac", "entropy"]))
         for i in range(self.policy_iters):
             self.optimizer.zero_grad()
-            loss, kl, clipfrac, entropy = self.loss(
-                self.policy, episodes, obs, acts, weights, old_log_probs
+            loss, kl, clipfrac, entropy = ppo_loss(
+                self.policy, obs, acts, weights, old_log_probs, self.clip_ratio
             )
             if kl > self.target_kl:
                 logger.warning(
