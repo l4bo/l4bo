@@ -155,12 +155,11 @@ def unwrap(env):
         return env
 
 
-def make_single_env(env_name):
+def make_single_env(env_name, **kwargs):
     if "NoFrameskip" in env_name:
-        env = wrap_deepmind(make_atari(env_name))
+        env = wrap_deepmind(make_atari(env_name), **kwargs)
     else:
         env = gym.make(env_name)
-
     return env
 
 

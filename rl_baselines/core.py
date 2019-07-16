@@ -205,8 +205,10 @@ def default_model(env, hidden_sizes, n_acts):
     return model
 
 
-def make_env(env_name, num_envs):
-    env = SubprocVecEnv([lambda: make_single_env(env_name) for i in range(num_envs)])
+def make_env(env_name, num_envs, **kwargs):
+    env = SubprocVecEnv(
+        [lambda: make_single_env(env_name, **kwargs) for i in range(num_envs)]
+    )
     return env
 
 
