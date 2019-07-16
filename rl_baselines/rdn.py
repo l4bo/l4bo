@@ -1,6 +1,8 @@
-from rl_baselines.core import logger, logdir, gae_advantages
+from rl_baselines.core import logger, logdir, gae_advantages, discounted_returns
 from rl_baselines.ppo import ppo_loss
 from rl_baselines.model_updates import ValueUpdate
+from torch.distributions import Categorical
+from gym.spaces import Discrete, Box
 
 import multiprocessing
 import torch.nn.functional as F
@@ -9,12 +11,56 @@ import torch
 import copy
 
 
-class GlobalModel(nn.Module):
-    def __init__(self):
+class RandomNet(nn.Module):
+    def __init__(self, hidden_sizes):
         super().__init__()
-        # self.value_int = value_int
-        # self.value_ext = value_ext
-        # self.policy = policy
+        self.hidden_sizes = hidden_sizes
+        self.int_convs = nn.ModuleList()
+        layers = [
+            {"out_channels": 32, "kernel_size": 8, "stride": 4},
+            {"out_channels": 64, "kernel_size": 4, "stride": 2},
+            {"out_channels": 64, "kernel_size": 3, "stride": 1},
+        ]
+        # We only look at last frame for surprise
+        in_channels = 1
+        for layer in layers:
+            self.int_convs.append(nn.Conv2d(in_channels=in_channels, **layer))
+            in_channels = layer["out_channels"]
+
+        in_ = 3136
+        self.fcs = nn.ModuleList()
+        for out_ in hidden_sizes:
+            self.fcs.append(nn.Linear(in_, out_))
+            in_ = out_
+        self.leaky_relu = nn.LeakyReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, normed_obs):
+        E, B, H, W, C = normed_obs.shape
+
+        # We only look at last frame for surprise
+        x = normed_obs.contiguous().view(-1, H, W, C)[:, :, :, -1:]
+        # Pytorch uses C, H, W for its convolution
+        x = x.permute(0, 3, 1, 2)
+
+        for int_conv in self.int_convs:
+            x = self.leaky_relu(int_conv(x))
+
+        x = x.reshape(E * B, -1)
+
+        for i, fc in enumerate(self.fcs):
+            x = fc(x)
+            if i == len(self.fcs) - 1:
+                x = self.relu(x)
+        x = x.reshape(E, B, -1)
+        return x
+
+
+class GlobalModel(nn.Module):
+    def __init__(self, n_acts):
+        super().__init__()
+
+        self.n_acts = n_acts
 
         self.convs = nn.ModuleList()
         layers = [
@@ -29,10 +75,25 @@ class GlobalModel(nn.Module):
 
         self.activation = nn.ReLU(inplace=True)
 
-        self.fc1 = nn.Linear(32, 128)
-        self.fc2 = nn.Linear(128, 448)
+        self.fc1 = nn.Linear(2304, 256)
+        self.fc2 = nn.Linear(256, 448)
+        self.fc_val = nn.Linear(448, 448)
+        self.fc_act = nn.Linear(448, 448)
+        self.fc_logits = nn.Linear(448, self.n_acts)
+        self.fc_value_int = nn.Linear(448, 1)
+        self.fc_value_ext = nn.Linear(448, 1)
+
+        self.random_net = RandomNet([512])
+        for p in self.random_net.parameters():
+            p.requires_grad = False
+        self.sibling_net = RandomNet([512, 512, 512])
 
     def forward(self, obs):
+        batch_squeeze = False
+        if len(obs.shape) == 4:
+            obs = obs.unsqueeze(1)
+            batch_squeeze = True
+            # Assume batch = 1
         assert len(obs.shape) == 5
         E, B, H, W, C = obs.shape
         assert C == 4  # Frame stacks
@@ -44,30 +105,41 @@ class GlobalModel(nn.Module):
             x = conv(x)
             x = self.activation(x)
 
+        x = x.view(E * B, -1)
         x = self.activation(self.fc1(x))
+        X = self.activation(self.fc2(x))
+        Xtout = X
 
-        return x, x
+        Xtout = X + self.activation(self.fc_val(Xtout))
+        X = X + self.activation(self.fc_act(X))
 
+        logits = self.fc_logits(X)
+        value_int = self.fc_value_int(Xtout)
+        value_ext = self.fc_value_ext(Xtout)
 
-class IntrinsicValueModel(nn.Module):
-    def __init__(self, value_model, random_net, sibling_net):
-        super().__init__()
-        self.value_model = value_model
-        self.random_net = random_net
-        for p in self.random_net.parameters():
-            p.requires_grad = False
-        self.sibling_net = sibling_net
+        if batch_squeeze:
+            logits = logits.reshape(E, self.n_acts)
+            value_int = value_int.reshape(E)
+            value_ext = value_ext.reshape(E)
+        else:
+            logits = logits.reshape(E, B, self.n_acts)
+            value_int = value_int.reshape(E, B)
+            value_ext = value_ext.reshape(E, B)
 
-    def forward(self, x):
-        return self.value_model(x)
+        policy = Categorical(logits=logits)
+        return policy, value_int, value_ext
+
+    def policy(self, obs):
+        return self.forward(obs)[0]
 
     def intrinsic_rewards(self, obs, obs_mean, obs_std):
         obs = (obs - obs_mean) / (obs_std + 1e-5)
+        obs = torch.clamp(obs, -5.0, 5.0)
         with torch.no_grad():
             X_r = self.random_net(obs)
         X_r_hat = self.sibling_net(obs)
 
-        rewards_loss = (X_r - X_r_hat) ** 2
+        rewards_loss = ((X_r - X_r_hat) ** 2).mean(dim=-1)
         return rewards_loss, X_r
 
 
@@ -112,16 +184,15 @@ class RDNValueUpdate(ValueUpdate):
         obs_std,
     ):
         current_obs = obs[:, :-1, ...]
-        pred_values_int = self.value_int(current_obs)
-        loss_int = F.mse_loss(pred_values_int, returns_int)
 
-        pred_values_ext = self.value_ext(current_obs)
+        rews_int, X_r = self.model.intrinsic_rewards(obs, self.obs_mean, obs_std)
+        policy, pred_values_int, pred_values_ext = self.model(current_obs)
+
+        loss_int = F.mse_loss(pred_values_int, returns_int)
         loss_ext = F.mse_loss(pred_values_ext, returns_ext)
 
         # No coeff here, we try to learn value functions, not policy
         value_loss = loss_ext + loss_int
-
-        rews_int, X_r = self.value_int.intrinsic_rewards(obs, self.obs_mean, obs_std)
 
         pi_loss, kl, clipfrac, entropy = ppo_loss(
             self.policy, current_obs, acts, advs, old_log_probs, self.clip_ratio
@@ -170,19 +241,15 @@ class RDNValueUpdate(ValueUpdate):
                 self.obs_var = M2 / tot_count
 
             obs_std = torch.sqrt(self.obs_var)
-            rews_int, X_r = self.value_int.intrinsic_rewards(
-                obs, self.obs_mean, obs_std
-            )
 
-            current_obs = obs[:, :-1, ...]
-            next_obs = obs[:, -1, ...]
-            next_ext = self.value_ext(next_obs)
-            next_int = self.value_int(next_obs)
+            # Model calls
+            rews_int, X_r = self.model.intrinsic_rewards(obs, self.obs_mean, obs_std)
+            old_dist, values_int, values_ext = self.model(obs)
 
-            values_int = self.value_int(obs)
-            values_ext = self.value_ext(obs)
+            next_ext = values_ext[:, -1, ...]
+            next_int = values_int[:, -1, ...]
 
-            # Intrinsic reward is non-episodic.
+            # Intrinsic reward is non-episodic, so all dones = 0
             dones = torch.zeros(*episodes.dones.shape)
             advantages = torch.zeros(*episodes.rews.shape)
             adv_int = gae_advantages(
@@ -192,23 +259,27 @@ class RDNValueUpdate(ValueUpdate):
 
             advs = adv_int * self.value_int_coeff + adv_ext * self.value_ext_coeff
 
-            old_dist = self.policy(current_obs)
+            old_dist = Categorical(logits=old_dist.logits[:, :-1, ...])
             old_log_probs = old_dist.log_prob(acts)
 
         returns_ext = episodes.discounted_returns(
             gamma=self.gamma, pred_values=next_ext
         )
-        returns_int = episodes.discounted_returns(
-            gamma=self.gamma, pred_values=next_int
+
+        dones = torch.zeros(*episodes.dones.shape)
+        returns_int = torch.zeros(*episodes.rews.shape)
+        returns_int = discounted_returns(
+            returns_int,
+            gamma=self.gamma,
+            pred_values=next_int,
+            dones=dones,
+            rews=rews_int,
         )
         nperbatch = B // self.num_mini_batches
-        print(nperbatch)
         for i in range(self.iters):
             for start in range(0, B, nperbatch):
                 end = start + nperbatch
                 slice_ = slice(start, end)
-
-                print(i, start)
 
                 loss, losses = self.loss(
                     returns_int[slice_],
@@ -224,21 +295,10 @@ class RDNValueUpdate(ValueUpdate):
                 self.optimizer.zero_grad()
                 loss.backward()
                 total_norm = 0
-                for p in self.policy.parameters():
-                    param_norm = p.grad.data.norm(2)
-                    total_norm += param_norm.item() ** 2
-                for p in self.value_int.parameters():
+                for p in self.model.parameters():
                     if p.requires_grad:
-                        try:
-                            param_norm = p.grad.data.norm(2)
-                        except Exception:
-                            import ipdb
-
-                            ipdb.set_trace()
+                        param_norm = p.grad.data.norm(2)
                         total_norm += param_norm.item() ** 2
-                for p in self.value_ext.parameters():
-                    param_norm = p.grad.data.norm(2)
-                    total_norm += param_norm.item() ** 2
                 total_norm = total_norm ** (1.0 / 2)
                 losses["grad_norm"] = total_norm
                 self.optimizer.step()
@@ -252,8 +312,7 @@ class RDNValueUpdate(ValueUpdate):
 
 if __name__ == "__main__":
     import argparse
-    from rl_baselines.core import solve, default_policy_model, make_env, default_model
-    from rl_baselines.models import ValueModel
+    from rl_baselines.core import solve, make_env
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -269,7 +328,7 @@ if __name__ == "__main__":
     parser.add_argument("--target-kl", type=float, default=0.01)
 
     # 128 steps * 32 env in OpenAI
-    parser.add_argument("--batch-size", type=int, default=5000)
+    parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--num_mini_batches", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lam", type=float, default=0.95)
@@ -279,17 +338,16 @@ if __name__ == "__main__":
 
     logger.info("Using PPO formulation of policy gradient.")
 
-    model = GlobalModel()
     env = make_env(args.env_name, args.num_envs, frame_stack=args.frame_stack)
+    if isinstance(env.action_space, Discrete):
+        n_acts = env.action_space.n
+    elif isinstance(env.action_space, Box):
+        assert (
+            len(env.action_space.shape) == 1
+        ), f"This example only works for envs with Box(n,) not {env.action_space} action spaces."
+        n_acts = env.action_space.shape[0]
 
-    # policy = default_policy_model(env, hidden_sizes)
-    # value_int_model = default_model(env, hidden_sizes, 1)
-    # random_net = default_model(env, hidden_sizes, 1)
-    # sibling_net = default_model(env, hidden_sizes, 1)
-    # value_int = IntrinsicValueModel(value_int_model, random_net, sibling_net)
-    # value_ext = ValueModel(default_model(env, hidden_sizes, 1))
-
-    global_model = GlobalModel()
+    global_model = GlobalModel(n_acts)
     optimizer = torch.optim.Adam(global_model.parameters(), lr=args.lr)
 
     assert (

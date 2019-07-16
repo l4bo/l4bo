@@ -47,15 +47,39 @@ if not logger.handlers:
 def gae_advantages(advantages, values, dones, rews, gamma, lambda_):
     lastgaelam = 0
     num_steps = advantages.shape[1]
+
+    assert num_steps == dones.shape[1]
+    assert num_steps + 1 == values.shape[1]
+    assert num_steps <= rews.shape[1]
+
     for t in range(num_steps - 1, -1, -1):  # nsteps-1 ... 0
         nextdone = dones[:, t + 1] if t + 1 < num_steps else 0
         nextvals = values[:, t + 1]
         nextnotdone = 1 - nextdone
-        delta = rews[:, t] + gamma * nextvals * nextnotdone - values[:, t]
-        advantages[:, t] = lastgaelam = (
-            delta + gamma * lambda_ * nextnotdone * lastgaelam
-        )
+        try:
+            delta = rews[:, t] + gamma * nextvals * nextnotdone - values[:, t]
+            advantages[:, t] = lastgaelam = (
+                delta + gamma * lambda_ * nextnotdone * lastgaelam
+            )
+        except Exception:
+            import ipdb
+
+            ipdb.set_trace()
     return advantages
+
+
+def discounted_returns(rets, gamma, pred_values, dones, rews):
+    num_steps = rets.shape[1]
+    assert num_steps == dones.shape[1]
+    assert num_steps <= rews.shape[1]
+
+    curr_rets = pred_values
+    for t in range(num_steps - 1, -1, -1):  # nsteps-1 ... 0
+        nextdone = dones[:, t + 1] if t + 1 < num_steps else 0
+        nextnotdone = 1 - nextdone
+        curr_rets = rews[:, t] + gamma * curr_rets * nextnotdone
+        rets[:, t] = curr_rets
+    return rets
 
 
 class Episodes:
@@ -78,13 +102,7 @@ class Episodes:
 
     def discounted_returns(self, gamma, pred_values):
         rets = self.get_buffer("rets")
-        curr_rets = pred_values
-        for t in range(self.num_steps - 1, -1, -1):  # nsteps-1 ... 0
-            nextdone = self.dones[:, t + 1] if t + 1 < self.num_steps else 0
-            nextnotdone = 1 - nextdone
-            curr_rets = self.rews[:, t] + gamma * curr_rets * nextnotdone
-            rets[:, t] = curr_rets
-        return rets
+        return discounted_returns(rets, gamma, pred_values, self.dones, self.rews)
 
     def discounted_returns_discard(self, gamma):
         rets = self.get_buffer("rets")
@@ -275,6 +293,7 @@ def solve(
     max_ret = -1e9
 
     num_steps = batch_size // env.num_envs
+    print(num_steps)
     episodes = Episodes(
         env.num_envs, num_steps, env.observation_space.shape, env.action_space.shape
     )
