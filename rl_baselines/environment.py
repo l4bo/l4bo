@@ -156,15 +156,14 @@ def unwrap(env):
 
 
 def make_single_env(env_name, **kwargs):
+    env = gym.make(env_name)
+    env = AddEpisodeStats(env)
     if "NoFrameskip" in env_name:
-        env = wrap_deepmind(make_atari(env_name), **kwargs)
-    else:
-        env = gym.make(env_name)
+        env = wrap_deepmind(make_atari(env, env_name), **kwargs)
     return env
 
 
-def make_atari(env_id, max_episode_steps=4500):
-    env = gym.make(env_id)
+def make_atari(env, env_id, max_episode_steps=4500):
     env._max_episode_steps = max_episode_steps * 4
     assert "NoFrameskip" in env.spec.id
     env = StickyActionEnv(env)
@@ -295,6 +294,29 @@ class DummyMontezumaInfoWrapper(gym.Wrapper):
 
     def reset(self):
         return self.env.reset()
+
+
+class AddEpisodeStats(gym.Wrapper):
+    def __init__(self, env):
+        """Adds the random state to the info field on the first step after reset
+        """
+        gym.Wrapper.__init__(self, env)
+
+    def step(self, action):
+        ob, r, d, info = self.env.step(action)
+        self.reward += r
+        self.length += 1
+        if d:
+            if "episode" not in info:
+                info["episode"] = {}
+            info["episode"]["reward"] = self.reward
+            info["episode"]["length"] = self.length
+        return ob, r, d, info
+
+    def reset(self, **kwargs):
+        self.reward = 0
+        self.length = 0
+        return self.env.reset(**kwargs)
 
 
 class AddRandomStateToInfo(gym.Wrapper):

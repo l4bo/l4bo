@@ -6,6 +6,7 @@ import logging
 import datetime
 import os
 import sys
+from collections import deque
 from rl_baselines.environment import SubprocVecEnv, make_single_env
 from rl_baselines.models import ContinuousPolicy, DiscretePolicy, MLP, Conv, ValueModel
 
@@ -153,35 +154,40 @@ def gather_episodes(episodes, env, num_steps, policy, epoch):
 
     # reset episode-specific variables
 
-    obs = env.reset()  # first obs comes from starting distribution
-    # if epoch == 0:
-    #     obs = env.reset()  # first obs comes from starting distribution
-    # else:
-    #     obs, _, _, _ = env.step_wait()
+    # obs = env.reset()  # first obs comes from starting distribution
+    if epoch == 0:
+        obs = env.reset()  # first obs comes from starting distribution
+    else:
+        obs, _, _, _ = env.step_wait()
 
     obs = torch.from_numpy(obs).float()
+
+    finished_episodes_stats = []
 
     for step in range(num_steps):
         episodes.obs[:, step] = obs
         # act in the environment
         dist = policy(obs)
         acts = dist.sample()
-        obs, rews, dones, _ = env.step(acts.cpu().numpy())
+        obs, rews, dones, infos = env.step(acts.cpu().numpy())
         obs = torch.from_numpy(obs).float()
 
         episodes.acts[:, step] = acts  # Already torch tensor
         episodes.rews[:, step] = torch.from_numpy(rews)
         episodes.dones[:, step] = torch.from_numpy(dones)
+        for info in infos:
+            if "episode" in info:
+                finished_episodes_stats.append(info["episode"])
 
     # Push last observation needed for advantages
     episodes.obs[:, num_steps] = obs
 
     # Send a last action to environments so we can continue the episode
-    # dist = policy(obs)
-    # acts = dist.sample()
-    # env.step_async(acts.cpu().numpy())
+    dist = policy(obs)
+    acts = dist.sample()
+    env.step_async(acts.cpu().numpy())
 
-    return episodes
+    return episodes, finished_episodes_stats
 
 
 def train_one_epoch(env, num_steps, epoch, episodes, policy_update, device):
@@ -190,7 +196,9 @@ def train_one_epoch(env, num_steps, epoch, episodes, policy_update, device):
 
     # collect experience by acting in the environment with current policy
     # start = datetime.datetime.now()
-    episodes = gather_episodes(episodes, env, num_steps, policy, epoch)
+    episodes, finished_episodes_stats = gather_episodes(
+        episodes, env, num_steps, policy, epoch
+    )
     # end_rollout = datetime.datetime.now()
 
     losses = policy_update.update(episodes)
@@ -198,7 +206,7 @@ def train_one_epoch(env, num_steps, epoch, episodes, policy_update, device):
     # logger.debug(f"Rollout time {end_rollout - start}")
     # logger.debug(f"Update time {datetime.datetime.now() - end_rollout}")
 
-    return losses, episodes
+    return losses, episodes, finished_episodes_stats
 
 
 def default_model(env, hidden_sizes, n_acts):
@@ -293,17 +301,29 @@ def solve(
     max_ret = -1e9
 
     num_steps = batch_size // env.num_envs
-    print(num_steps)
     episodes = Episodes(
         env.num_envs, num_steps, env.observation_space.shape, env.action_space.shape
     )
+
+    episode_stats = deque(maxlen=100)
     for epoch in range(epochs):
-        losses, episodes = train_one_epoch(
+        losses, episodes, finished_episodes_stats = train_one_epoch(
             env, num_steps, epoch, episodes, policy_update=policy_update, device=device
         )
-        rets, lens = episodes.stats()
-        rets = rets.mean()
-        lens = lens.mean()
+
+        episode_stats.extend(finished_episodes_stats)
+        all_rewards = []
+        all_lengths = []
+        visited_rooms = set()
+        for stat in episode_stats:
+            all_rewards.append(stat["reward"])
+            all_lengths.append(stat["length"])
+            if "visited_rooms" in stat:
+                visited_rooms |= stat["visited_rooms"]
+
+        rets = np.array(all_rewards).mean()
+        lens = np.array(all_lengths).mean()
+
         loss_string = "\t".join(
             [f"{loss_name}: {loss:.3f}" for loss_name, loss in losses.items()]
         )
@@ -311,9 +331,15 @@ def solve(
             "epoch: %3d \t %s \t return: %.3f \t ep_len: %.3f"
             % (epoch, loss_string, rets, lens)
         )
-        env_step += batch_size * env.num_envs
+        if visited_rooms:
+            logger.debug(f"Visited rooms : {visited_rooms}")
+        env_step += num_steps * env.num_envs
         writer.add_scalar(f"{env_name}/episode_reward", rets, global_step=env_step)
         writer.add_scalar(f"{env_name}/episode_length", lens, global_step=env_step)
+        if visited_rooms:
+            writer.add_scalar(
+                f"{env_name}/visited_rroms", len(visited_rooms), global_step=env_step
+            )
         if rets > max_ret:
             filename = os.path.join(logdir, "checkpoint.pth")
             torch.save(policy_update, filename)
